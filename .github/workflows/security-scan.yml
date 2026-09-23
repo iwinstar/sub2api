@@ -2,6 +2,10 @@ name: Security Scan
 
 on:
   push:
+    branches-ignore:
+      - main
+    tags:
+      - '**'
   pull_request:
   schedule:
     - cron: '0 3 * * 1'
