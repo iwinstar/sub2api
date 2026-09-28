@@ -1,0 +1,86 @@
+name: Sync upstream stable release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main' && github.repository != 'Wei-Shaw/sub2api'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # Optional token with Contents/Workflows write access if required.
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+
+      - name: Merge latest stable upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if [ "$(git rev-parse FETCH_HEAD)" != "$GITHUB_SHA" ]; then
+            echo 'main changed since dispatch. Run this workflow again.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # GitHub's latest stable Release; excludes drafts and prereleases.
+          release=$(gh api repos/Wei-Shaw/sub2api/releases/latest)
+          tag=$(jq -er 'select(.draft == false and .prerelease == false) | .tag_name' <<< "$release")
+          if [[ ! "$tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported release tag: $tag" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git fetch --no-tags https://github.com/Wei-Shaw/sub2api.git \
+            "refs/tags/$tag"
+          target=$(git rev-parse 'FETCH_HEAD^{commit}')
+          # Some releases tag the parent of the VERSION update. Include only
+          # a direct, non-merge child changing VERSION to this exact release.
+          git fetch --no-tags https://github.com/Wei-Shaw/sub2api.git refs/heads/main
+          upstream_main=$(git rev-parse 'FETCH_HEAD^{commit}')
+          if git merge-base --is-ancestor "$target" "$upstream_main"; then
+            next=$(git rev-list --reverse --first-parent "$target..$upstream_main" | sed -n '1p')
+            if [ -n "$next" ] && [ "$(git show -s --format=%P "$next")" = "$target" ] &&
+               [ "$(git diff-tree --no-commit-id --name-only -r "$next")" = 'backend/cmd/server/VERSION' ] &&
+               [ "$(git show "$next:backend/cmd/server/VERSION")" = "${tag#v}" ]; then
+              target=$next
+              echo "Included release VERSION update: $target" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "Upstream release: $tag ($target)" >> "$GITHUB_STEP_SUMMARY"
+          if git merge-base --is-ancestor "$target" HEAD; then
+            echo 'Already includes this release; nothing to sync.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git merge --no-ff --no-edit -m "Merge upstream $tag into main" "$target"; then
+            {
+              echo '### Merge failed — main was not updated'
+              echo 'Conflicting files (if any):'
+              echo '```text'
+              git diff --name-only --diff-filter=U
+              echo '```'
+              echo 'See the step log for details. Resolve manually, then dispatch again.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort || true
+            exit 1
+          fi
+
+          # Normal push: rejects concurrent divergent updates; never force-push.
+          if ! git push origin HEAD:refs/heads/main; then
+            echo 'Push failed. Check permissions, branch rules, or concurrent updates; see the step log.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Merged $tag into main: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
