@@ -266,6 +266,21 @@ func TestChannelMonitorV2HealthLeavesMissingTTFTUnknown(t *testing.T) {
 	require.Equal(t, "healthy", health.Overall)
 }
 
+func TestChannelMonitorV2HealthDoesNotScoreCacheBeforeRequestMinimum(t *testing.T) {
+	health := ChannelMonitorV2HealthForWithThresholds(
+		ChannelMonitorV2Metric{
+			RequestCount:         2,
+			CacheRate:            0,
+			CacheRateDenominator: 1000,
+		},
+		ChannelMonitorV2HealthThresholds{MinimumSample: 50},
+	)
+
+	require.Equal(t, "unknown", health.Overall)
+	require.Nil(t, health.Score)
+	require.Nil(t, health.CacheScore)
+}
+
 func TestChannelMonitorV2DefaultHealthThresholdsAreTolerant(t *testing.T) {
 	p50 := int64(2500)
 	health := ChannelMonitorV2HealthFor(ChannelMonitorV2Metric{
