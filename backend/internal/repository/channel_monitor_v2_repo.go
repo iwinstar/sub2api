@@ -536,7 +536,9 @@ func seedChannelMonitorV2MatrixAccumulators(filter service.ChannelMonitorV2Filte
 		if groupBy == service.ChannelMonitorV2GroupByPlatformModel || groupBy == service.ChannelMonitorV2GroupByPlatformGroupModel {
 			models = configuredChannelMonitorV2Models(cfg, platform, filter)
 			if len(models) == 0 {
-				models = []string{""}
+				// Do not seed an empty model placeholder. Actual traffic facts below
+				// create the real model rows when the allow-list is empty.
+				continue
 			}
 		}
 		for _, groupID := range groupIDs {
