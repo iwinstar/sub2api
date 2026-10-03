@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -14,7 +15,7 @@ const channelMonitorV2ModelSQL = `COALESCE(NULLIF(TRIM(ul.requested_model), ''),
 // Tiered retention balances UI windows against storage:
 //
 //	1m facts  → short (late writes + rebuild rollups)
-//	5m/1h/12h/1d rollups → longer, aligned to 90m / 24h / 7d / 30d(+audit)
+//	5m/1h/12h/1d rollups → longer, aligned to 120m / 24h / 7d / 30d(+audit)
 //
 // Backfill may still write short-lived 1m rows for old windows so rollups can be
 // built; prune at end of each recompute drops them past their TTL while rollups remain.
@@ -374,10 +375,31 @@ func (r *channelMonitorV2Repository) recomputeFixedRollups(ctx context.Context, 
 		if _, err := tx.ExecContext(ctx, channelMonitorV2MetricsRollupSQL, interval, seconds, start, end); err != nil {
 			return fmt.Errorf("roll up channel monitor v2 metrics %ds: %w", seconds, err)
 		}
-		if _, err := tx.ExecContext(ctx, channelMonitorV2UserMetricsRollupSQL, interval, seconds, start, end); err != nil {
+		userRollupSQL := channelMonitorV2UserMetricsRollupSQL
+		histogramRollupSQL := channelMonitorV2HistogramRollupSQL
+		if seconds >= 3600 {
+			source := "channel_monitor_v2_user_metrics_rollup"
+			histSource := "channel_monitor_v2_latency_histograms_rollup"
+			if seconds >= 7200 {
+				source = "channel_monitor_v2_user_metrics_rollup"
+				histSource = "channel_monitor_v2_latency_histograms_rollup"
+			}
+			userRollupSQL = strings.Replace(userRollupSQL, "channel_monitor_v2_user_metrics_1m", source, 1)
+			histogramRollupSQL = strings.Replace(histogramRollupSQL, "channel_monitor_v2_latency_histograms_1m", histSource, 1)
+			// Higher tiers read the immediately finer tier. The 1h tier reads 5m;
+			// 12h/1d read 1h, avoiding a full-day scan of minute rows.
+			if seconds == 3600 {
+				userRollupSQL = strings.Replace(userRollupSQL, "WHERE m.bucket_start >=", "WHERE m.bucket_seconds = 300 AND m.bucket_start >=", 1)
+				histogramRollupSQL = strings.Replace(histogramRollupSQL, "WHERE h.bucket_start >=", "WHERE h.bucket_seconds = 300 AND h.bucket_start >=", 1)
+			} else {
+				userRollupSQL = strings.Replace(userRollupSQL, "WHERE m.bucket_start >=", "WHERE m.bucket_seconds = 3600 AND m.bucket_start >=", 1)
+				histogramRollupSQL = strings.Replace(histogramRollupSQL, "WHERE h.bucket_start >=", "WHERE h.bucket_seconds = 3600 AND h.bucket_start >=", 1)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, userRollupSQL, interval, seconds, start, end); err != nil {
 			return fmt.Errorf("roll up channel monitor v2 user metrics %ds: %w", seconds, err)
 		}
-		if _, err := tx.ExecContext(ctx, channelMonitorV2HistogramRollupSQL, interval, seconds, start, end); err != nil {
+		if _, err := tx.ExecContext(ctx, histogramRollupSQL, interval, seconds, start, end); err != nil {
 			return fmt.Errorf("roll up channel monitor v2 histograms %ds: %w", seconds, err)
 		}
 		if _, err := tx.ExecContext(ctx, channelMonitorV2ErrorRollupSQL, interval, seconds, start, end); err != nil {

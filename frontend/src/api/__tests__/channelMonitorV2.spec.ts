@@ -7,14 +7,14 @@ afterEach(() => vi.restoreAllMocks())
 describe('channel monitor V2 query serialization', () => {
   it('uses repeated keys without bracket suffixes for array filters', () => {
     const query = repeatedArrayParamsSerializer({
-      range: '90m',
+      range: '120m',
       platform: ['openai', 'grok'],
       group_id: [1, 2],
       model: undefined,
       group_by: 'platform_group_model',
     })
 
-    expect(query).toBe('range=90m&platform=openai&platform=grok&group_id=1&group_id=2&group_by=platform_group_model')
+    expect(query).toBe('range=120m&platform=openai&platform=grok&group_id=1&group_id=2&group_by=platform_group_model')
     expect(query).not.toContain('%5B%5D')
   })
 

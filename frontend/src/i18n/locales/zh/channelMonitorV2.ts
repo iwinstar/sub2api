@@ -22,7 +22,7 @@ export default {
     otherModels: '其他模型',
     ignored: '忽略',
     currentUser: '当前用户',
-    ranges: { '90m': '90m', '24h': '24h', '7d': '7d', '30d': '30d' },
+    ranges: { '120m': '120m', '24h': '24h', '7d': '7d', '30d': '30d' },
     filters: {
       platform: '平台', allPlatforms: '全部', group: '分组', allGroups: '全部', model: '模型', allModels: '全部',
       empty: '暂无可选项', selectedCount: '{count} 项', labelValue: '{label}：{value}'

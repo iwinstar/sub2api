@@ -171,7 +171,7 @@ type ChannelMonitorV2Coverage struct {
 	CoverageComplete bool `json:"coverage_complete"`
 	BucketSeconds    int  `json:"bucket_seconds"`
 	// Bootstrap is set while the first-upgrade historical backfill toward the
-	// product windows (90m / 24h / 7d / 30d) is still running. Omitted or
+	// product windows (120m / 24h / 7d / 30d) is still running. Omitted or
 	// inactive once the 30d UI range is fully covered; longer retention (90d)
 	// may continue silently without a progress banner.
 	Bootstrap *ChannelMonitorV2Bootstrap `json:"bootstrap,omitempty"`
@@ -186,7 +186,7 @@ type ChannelMonitorV2Bootstrap struct {
 	ProgressPercent int `json:"progress_percent"`
 	// CoveredFrom is the earliest minute already recomputed (backfill cursor).
 	CoveredFrom time.Time `json:"covered_from,omitempty"`
-	// TargetStart is now−30d (product bootstrap goal for 90m/24h/7d/30d).
+	// TargetStart is now−30d (product bootstrap goal for 120m/24h/7d/30d).
 	TargetStart time.Time `json:"target_start,omitempty"`
 }
 
@@ -444,8 +444,8 @@ func (s *ChannelMonitorV2Service) ParseFilter(rangeValue string, platforms, mode
 	now := s.now().UTC()
 	var window, bucket time.Duration
 	switch strings.TrimSpace(rangeValue) {
-	case "", "90m":
-		rangeValue, window, bucket = "90m", 90*time.Minute, 5*time.Minute
+	case "", "120m":
+		rangeValue, window, bucket = "120m", 120*time.Minute, 5*time.Minute
 	case "24h":
 		window, bucket = 24*time.Hour, time.Hour
 	case "7d":

@@ -8,7 +8,7 @@ export default {
     bootstrap: {
       title: 'Building historical monitor data',
       description:
-        'On first enable, passive aggregation silently fills the 90m, 24h, 7d, and 30d windows in the background. All ranges become complete once this finishes.',
+        'On first enable, passive aggregation silently fills the 120m, 24h, 7d, and 30d windows in the background. All ranges become complete once this finishes.',
       progress: '{percent}% complete',
       working: 'Aggregating in the background…',
     },
@@ -22,7 +22,7 @@ export default {
     otherModels: 'Other models',
     ignored: 'Ignored',
     currentUser: 'Current user',
-    ranges: { '90m': '90m', '24h': '24h', '7d': '7d', '30d': '30d' },
+    ranges: { '120m': '120m', '24h': '24h', '7d': '7d', '30d': '30d' },
     filters: {
       platform: 'Platform', allPlatforms: 'All', group: 'Group', allGroups: 'All', model: 'Model', allModels: 'All',
       empty: 'No options', selectedCount: '{count}', labelValue: '{label}: {value}'

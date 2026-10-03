@@ -15,7 +15,7 @@ const (
 	// Retention walks back to the longest stored tier (1d rollup = 90d). Per-tier
 	// prune in the repository drops short-lived 1m/user/hist facts earlier.
 	channelMonitorV2RetentionMax = 90 * 24 * time.Hour
-	// First tick after upgrade prioritizes the default 90m view (with small padding).
+	// First tick after upgrade prioritizes the default 120m view (with small padding).
 	channelMonitorV2BootstrapFirst = 2 * time.Hour
 	// Always refresh a small trailing window so late writes land without
 	// re-aggregating large history every tick.
@@ -25,7 +25,7 @@ const (
 	// Initial historical chunk after the 2h seed.
 	channelMonitorV2BackfillChunkInit = time.Hour
 	channelMonitorV2MinBackfillChunk  = 15 * time.Minute
-	// Depth-based ceilings (product phases 90m → 1d → 7d → 30d → 90d).
+	// Depth-based ceilings (product phases 120m → 1d → 7d → 30d → 90d).
 	channelMonitorV2MaxChunkNear1d = 2 * time.Hour
 	channelMonitorV2MaxChunkNear7d = 4 * time.Hour
 	channelMonitorV2MaxChunkFar    = 6 * time.Hour
@@ -241,7 +241,7 @@ func (s *ChannelMonitorV2Aggregator) runOnce() {
 	hasData := s.hasAggregated
 	s.mu.Unlock()
 
-	// Phase 1 (first upgrade / empty): seed the default 90m UI window quickly.
+	// Phase 1 (first upgrade / empty): seed the default 120m UI window quickly.
 	if !hasData || cursor.IsZero() {
 		start := now.Add(-channelMonitorV2BootstrapFirst)
 		started := time.Now()
