@@ -31,23 +31,27 @@ func NewChannelMonitorV2Repository(db *sql.DB, cfg *config.Config) service.Chann
 
 func (r *channelMonitorV2Repository) GetConfig(ctx context.Context) (*service.ChannelMonitorV2Config, error) {
 	var cfg service.ChannelMonitorV2Config
-	var platforms, thresholds []byte
+	var platforms, thresholds, displayGroups []byte
 	err := r.db.QueryRowContext(ctx, `
 		SELECT version, enabled, refresh_interval_seconds, platforms, group_ids,
 		       COALESCE(ignored_error_categories, '{}'),
 		       COALESCE(health_thresholds, '{}'::jsonb),
-		       updated_at, updated_by
+		       updated_at, updated_by,
+		       COALESCE((SELECT value FROM settings WHERE key = 'channel_monitor_v2_display_groups'), '[]')
 		FROM channel_monitor_v2_config WHERE id = 1`).Scan(
 		&cfg.Version, &cfg.Enabled, &cfg.RefreshIntervalSeconds, &platforms,
 		pq.Array(&cfg.GroupIDs), pq.Array(&cfg.IgnoredErrorCategories),
 		&thresholds,
-		&cfg.UpdatedAt, &cfg.UpdatedBy,
+		&cfg.UpdatedAt, &cfg.UpdatedBy, &displayGroups,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get channel monitor v2 config: %w", err)
 	}
 	if err := json.Unmarshal(platforms, &cfg.Platforms); err != nil {
 		return nil, fmt.Errorf("decode channel monitor v2 platforms: %w", err)
+	}
+	if err := json.Unmarshal(displayGroups, &cfg.DisplayGroups); err != nil {
+		return nil, fmt.Errorf("decode channel monitor v2 display groups: %w", err)
 	}
 	if cfg.IgnoredErrorCategories == nil {
 		cfg.IgnoredErrorCategories = []string{}
@@ -73,9 +77,18 @@ func (r *channelMonitorV2Repository) UpdateConfig(ctx context.Context, cfg servi
 	if err != nil {
 		return nil, err
 	}
+	displayGroups, err := json.Marshal(cfg.DisplayGroups)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
 	var updated service.ChannelMonitorV2Config
 	var raw, rawThresholds []byte
-	err = r.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		UPDATE channel_monitor_v2_config
 		SET version = version + 1, enabled = $1, refresh_interval_seconds = $2,
 		    platforms = $3, group_ids = $4, ignored_error_categories = $5,
@@ -106,6 +119,42 @@ func (r *channelMonitorV2Repository) UpdateConfig(ctx context.Context, cfg servi
 	updated.HealthThresholds = service.DefaultChannelMonitorV2HealthThresholds()
 	_ = json.Unmarshal(rawThresholds, &updated.HealthThresholds)
 	updated.HealthThresholds = service.NormalizeChannelMonitorV2HealthThresholds(updated.HealthThresholds)
+	members := []int64{}
+	for _, group := range cfg.DisplayGroups {
+		members = append(members, group.GroupIDs...)
+	}
+	if len(members) > 0 {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM groups WHERE id = ANY($1) AND deleted_at IS NULL`, pq.Array(members)).Scan(&count); err != nil {
+			return nil, err
+		}
+		if count != len(members) {
+			return nil, fmt.Errorf("%w: display group contains missing groups", service.ErrChannelMonitorV2InvalidConfig)
+		}
+		names := make([]string, 0, len(cfg.DisplayGroups))
+		for _, group := range cfg.DisplayGroups {
+			names = append(names, strings.TrimSpace(group.Name))
+		}
+		var collision bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+ SELECT 1 FROM groups WHERE deleted_at IS NULL
+ AND NOT (id = ANY($1)) AND BTRIM(name) = ANY($2)
+)`, pq.Array(members), pq.Array(names)).Scan(&collision); err != nil {
+			return nil, err
+		}
+		if collision {
+			return nil, fmt.Errorf("%w: display group name conflicts with an unmerged group", service.ErrChannelMonitorV2InvalidConfig)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings (key, value, updated_at)
+ VALUES ('channel_monitor_v2_display_groups', $1, NOW())
+ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`, string(displayGroups)); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	updated.DisplayGroups = cfg.DisplayGroups
 	return &updated, nil
 }
 
@@ -366,6 +415,7 @@ func (r *channelMonitorV2Repository) GetModels(ctx context.Context, filter servi
 
 type channelMonitorV2MatrixKey struct {
 	platform, model string
+	displayGroupID  string
 	groupID         int64
 }
 
@@ -376,6 +426,41 @@ type channelMonitorV2MatrixAccumulator struct {
 }
 
 func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, groupBy service.ChannelMonitorV2GroupBy, admin bool) (*service.ChannelMonitorV2Matrix, error) {
+	// A display group shares its aggregate health with viewers who can access
+	// a selected member. Expand only this matrix's local scope, never the caller's
+	// slices or other endpoints. Start from authorized, monitored, selected IDs;
+	// guessing an unauthorized member ID must not grant access to its group.
+	if len(cfg.DisplayGroups) > 0 && (groupBy == service.ChannelMonitorV2GroupByPlatformGroup || groupBy == service.ChannelMonitorV2GroupByPlatformGroupModel) {
+		selected, empty := channelMonitorV2ScopedGroupIDs(filter, cfg)
+		if empty {
+			return &service.ChannelMonitorV2Matrix{GroupBy: groupBy, Items: []service.ChannelMonitorV2MatrixRow{}}, nil
+		}
+		if len(selected) > 0 {
+			eligible, expanded := map[int64]bool{}, map[int64]bool{}
+			for _, id := range selected {
+				eligible[id], expanded[id] = true, true
+			}
+			for _, group := range cfg.DisplayGroups {
+				for _, member := range group.GroupIDs {
+					if eligible[member] {
+						for _, id := range group.GroupIDs {
+							expanded[id] = true
+						}
+						break
+					}
+				}
+			}
+			ids := make([]int64, 0, len(expanded))
+			for id := range expanded {
+				ids = append(ids, id)
+			}
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+			filter.GroupIDs = ids
+			filter.AllowedGroupIDs = ids
+			filter.RestrictGroups = true
+		}
+	}
+	displayGroups := channelMonitorV2DisplayGroupIndex(cfg)
 	if channelMonitorV2RestrictedGroupScopeEmpty(filter, cfg) {
 		return &service.ChannelMonitorV2Matrix{GroupBy: groupBy, Items: []service.ChannelMonitorV2MatrixRow{}}, nil
 	}
@@ -408,7 +493,7 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 	if err != nil {
 		return nil, err
 	}
-	accs := seedChannelMonitorV2MatrixAccumulators(filter, cfg, groupBy, groupInfo)
+	accs := seedChannelMonitorV2MatrixAccumulators(filter, cfg, groupBy, groupInfo, displayGroups)
 	for _, fact := range facts {
 		if !channelMonitorV2ModelSelected(filter, cfg, fact.Platform, fact.Model) {
 			continue
@@ -418,7 +503,7 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 			fact.GroupID <= 0 {
 			continue
 		}
-		key := channelMonitorV2MatrixDimensionKey(groupBy, cfg, fact.Platform, fact.GroupID, fact.Model)
+		key := channelMonitorV2MatrixDimensionKey(groupBy, cfg, displayGroups, fact.Platform, fact.GroupID, fact.Model)
 		acc := accs[key]
 		if acc == nil {
 			acc = &channelMonitorV2MatrixAccumulator{total: newMetricAccumulator(), buckets: make(map[string]*metricAccumulator)}
@@ -443,7 +528,7 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 			histogram.GroupID <= 0 {
 			continue
 		}
-		key := channelMonitorV2MatrixDimensionKey(groupBy, cfg, histogram.Platform, histogram.GroupID, histogram.Model)
+		key := channelMonitorV2MatrixDimensionKey(groupBy, cfg, displayGroups, histogram.Platform, histogram.GroupID, histogram.Model)
 		acc := accs[key]
 		if acc == nil {
 			continue
@@ -456,19 +541,27 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 
 	result := &service.ChannelMonitorV2Matrix{GroupBy: groupBy, Coverage: *coverage, Items: make([]service.ChannelMonitorV2MatrixRow, 0, len(accs))}
 	minutes := channelMonitorV2CoveredMinutes(filter, *coverage)
-	ignoredByDimBucket, ignoredByDim, err := r.loadIgnoredErrorCountsByMatrixKey(ctx, effectiveFilter, cfg, groupBy)
+	ignoredByDimBucket, ignoredByDim, err := r.loadIgnoredErrorCountsByMatrixKey(ctx, effectiveFilter, cfg, groupBy, displayGroups)
 	if err != nil {
 		return nil, fmt.Errorf("load ignored error counts by matrix key: %w", err)
 	}
 	for key, acc := range accs {
-		// platform_group views only emit rows with a real group_id.
+		// Group views emit original groups or configured display groups, never bare platforms.
 		if (groupBy == service.ChannelMonitorV2GroupByPlatformGroup || groupBy == service.ChannelMonitorV2GroupByPlatformGroupModel) &&
-			key.groupID <= 0 {
+			key.groupID <= 0 && key.displayGroupID == "" {
 			continue
 		}
 		metrics := acc.total.metric(minutes, admin)
 		applyIgnoredErrors(&metrics, ignoredByDim[key])
-		row := service.ChannelMonitorV2MatrixRow{Platform: key.platform, GroupName: acc.groupName, Model: key.model, Metrics: metrics, Health: service.ChannelMonitorV2HealthForWithThresholds(metrics, cfg.HealthThresholds), Buckets: []service.ChannelMonitorV2TrendPoint{}}
+		if key.displayGroupID != "" {
+			for _, group := range cfg.DisplayGroups {
+				if group.ID == key.displayGroupID {
+					acc.groupName = group.Name
+					break
+				}
+			}
+		}
+		row := service.ChannelMonitorV2MatrixRow{DisplayGroupID: key.displayGroupID, Platform: key.platform, GroupName: acc.groupName, Model: key.model, Metrics: metrics, Health: service.ChannelMonitorV2HealthForWithThresholds(metrics, cfg.HealthThresholds), Buckets: []service.ChannelMonitorV2TrendPoint{}}
 		if key.groupID > 0 {
 			groupID := key.groupID
 			row.GroupID = &groupID
@@ -497,6 +590,9 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 		if a.GroupName != b.GroupName {
 			return a.GroupName < b.GroupName
 		}
+		if a.DisplayGroupID != b.DisplayGroupID {
+			return a.DisplayGroupID < b.DisplayGroupID
+		}
 		if a.GroupID != nil && b.GroupID != nil && *a.GroupID != *b.GroupID {
 			return *a.GroupID < *b.GroupID
 		}
@@ -505,10 +601,25 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 	return result, nil
 }
 
-func channelMonitorV2MatrixDimensionKey(groupBy service.ChannelMonitorV2GroupBy, cfg service.ChannelMonitorV2Config, platform string, groupID int64, model string) channelMonitorV2MatrixKey {
+// Build once per matrix request and reuse for facts, histograms, seeds and errors.
+func channelMonitorV2DisplayGroupIndex(cfg service.ChannelMonitorV2Config) map[int64]service.ChannelMonitorV2DisplayGroup {
+	groups := make(map[int64]service.ChannelMonitorV2DisplayGroup)
+	for _, group := range cfg.DisplayGroups {
+		for _, id := range group.GroupIDs {
+			groups[id] = group
+		}
+	}
+	return groups
+}
+
+func channelMonitorV2MatrixDimensionKey(groupBy service.ChannelMonitorV2GroupBy, cfg service.ChannelMonitorV2Config, displayGroups map[int64]service.ChannelMonitorV2DisplayGroup, platform string, groupID int64, model string) channelMonitorV2MatrixKey {
 	key := channelMonitorV2MatrixKey{platform: platform}
 	if groupBy == service.ChannelMonitorV2GroupByPlatformGroup || groupBy == service.ChannelMonitorV2GroupByPlatformGroupModel {
 		key.groupID = groupID
+		if group, ok := displayGroups[groupID]; ok {
+			key.groupID = 0
+			key.displayGroupID = group.ID
+		}
 	}
 	if groupBy == service.ChannelMonitorV2GroupByPlatformModel || groupBy == service.ChannelMonitorV2GroupByPlatformGroupModel {
 		key.model = channelMonitorV2DisplayModel(cfg, platform, model)
@@ -516,7 +627,7 @@ func channelMonitorV2MatrixDimensionKey(groupBy service.ChannelMonitorV2GroupBy,
 	return key
 }
 
-func seedChannelMonitorV2MatrixAccumulators(filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, groupBy service.ChannelMonitorV2GroupBy, groupInfo map[int64]channelMonitorV2GroupInfo) map[channelMonitorV2MatrixKey]*channelMonitorV2MatrixAccumulator {
+func seedChannelMonitorV2MatrixAccumulators(filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, groupBy service.ChannelMonitorV2GroupBy, groupInfo map[int64]channelMonitorV2GroupInfo, displayGroups map[int64]service.ChannelMonitorV2DisplayGroup) map[channelMonitorV2MatrixKey]*channelMonitorV2MatrixAccumulator {
 	accs := map[channelMonitorV2MatrixKey]*channelMonitorV2MatrixAccumulator{}
 	platforms := channelMonitorV2EnabledPlatforms(cfg)
 	if len(filter.Platforms) > 0 {
@@ -562,13 +673,7 @@ func seedChannelMonitorV2MatrixAccumulators(filter service.ChannelMonitorV2Filte
 				}
 			}
 			for _, model := range models {
-				key := channelMonitorV2MatrixKey{platform: platform}
-				if needsGroup {
-					key.groupID = groupID
-				}
-				if groupBy == service.ChannelMonitorV2GroupByPlatformModel || groupBy == service.ChannelMonitorV2GroupByPlatformGroupModel {
-					key.model = model
-				}
+				key := channelMonitorV2MatrixDimensionKey(groupBy, cfg, displayGroups, platform, groupID, model)
 				if accs[key] == nil {
 					accs[key] = &channelMonitorV2MatrixAccumulator{groupName: info.name, total: newMetricAccumulator(), buckets: make(map[string]*metricAccumulator)}
 				}
@@ -1528,6 +1633,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 	filter service.ChannelMonitorV2Filter,
 	cfg service.ChannelMonitorV2Config,
 	groupBy service.ChannelMonitorV2GroupBy,
+	displayGroups map[int64]service.ChannelMonitorV2DisplayGroup,
 ) (byDimBucket map[channelMonitorV2MatrixKey]map[string]int64, byDim map[channelMonitorV2MatrixKey]int64, err error) {
 	byDimBucket = map[channelMonitorV2MatrixKey]map[string]int64{}
 	byDim = map[channelMonitorV2MatrixKey]int64{}
@@ -1569,7 +1675,7 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 			continue
 		}
 		bucketKey := bucket.UTC().Format(time.RFC3339Nano)
-		key := channelMonitorV2MatrixDimensionKey(groupBy, cfg, platform, groupID, model)
+		key := channelMonitorV2MatrixDimensionKey(groupBy, cfg, displayGroups, platform, groupID, model)
 		byDim[key] += count
 		if byDimBucket[key] == nil {
 			byDimBucket[key] = map[string]int64{}

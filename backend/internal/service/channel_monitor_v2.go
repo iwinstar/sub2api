@@ -38,7 +38,16 @@ type ChannelMonitorV2PlatformConfig struct {
 	Models   []string `json:"models"`
 }
 
+// Display groups share aggregate matrix health with viewers of any selected member.
+// They do not grant access to member groups or other monitoring endpoints.
+type ChannelMonitorV2DisplayGroup struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	GroupIDs []int64 `json:"group_ids"`
+}
+
 type ChannelMonitorV2Config struct {
+	DisplayGroups          []ChannelMonitorV2DisplayGroup   `json:"display_groups,omitempty"`
 	Version                int                              `json:"version"`
 	Enabled                bool                             `json:"enabled"`
 	RefreshIntervalSeconds int                              `json:"refresh_interval_seconds"`
@@ -247,13 +256,14 @@ type ChannelMonitorV2ModelRow struct {
 }
 
 type ChannelMonitorV2MatrixRow struct {
-	Platform  string                       `json:"platform"`
-	GroupID   *int64                       `json:"group_id,omitempty"`
-	GroupName string                       `json:"group_name,omitempty"`
-	Model     string                       `json:"model,omitempty"`
-	Metrics   ChannelMonitorV2Metric       `json:"metrics"`
-	Health    ChannelMonitorV2Health       `json:"health"`
-	Buckets   []ChannelMonitorV2TrendPoint `json:"buckets"`
+	DisplayGroupID string                       `json:"display_group_id,omitempty"`
+	Platform       string                       `json:"platform"`
+	GroupID        *int64                       `json:"group_id,omitempty"`
+	GroupName      string                       `json:"group_name,omitempty"`
+	Model          string                       `json:"model,omitempty"`
+	Metrics        ChannelMonitorV2Metric       `json:"metrics"`
+	Health         ChannelMonitorV2Health       `json:"health"`
+	Buckets        []ChannelMonitorV2TrendPoint `json:"buckets"`
 }
 
 type ChannelMonitorV2Matrix struct {
@@ -642,6 +652,7 @@ func redactChannelMonitorV2PublicConfig(cfg *ChannelMonitorV2Config) {
 		return
 	}
 	cfg.GroupIDs = nil
+	cfg.DisplayGroups = nil
 	cfg.IgnoredErrorCategories = nil
 	cfg.UpdatedBy = nil
 	for i := range cfg.Platforms {
@@ -782,6 +793,9 @@ func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
 	var err error
 	cfg.GroupIDs, err = normalizeChannelMonitorV2GroupIDs(cfg.GroupIDs)
 	if err != nil {
+		return err
+	}
+	if err := normalizeChannelMonitorV2DisplayGroups(cfg); err != nil {
 		return err
 	}
 	cfg.IgnoredErrorCategories = normalizeChannelMonitorV2IgnoredCategories(cfg.IgnoredErrorCategories)

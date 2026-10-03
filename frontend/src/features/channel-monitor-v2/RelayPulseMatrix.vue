@@ -355,7 +355,7 @@ function rowLabel(row: MonitorMatrixRow): string {
 }
 
 function rowKey(row: MonitorMatrixRow): string {
-  return [row.platform, row.group_id || 0, row.model || ''].join(':')
+  return JSON.stringify([row.platform, row.display_group_id || row.group_id || 0, row.model || ''])
 }
 
 function successRate(metrics: MonitorMetric): string {

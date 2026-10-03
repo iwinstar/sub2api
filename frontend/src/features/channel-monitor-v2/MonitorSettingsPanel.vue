@@ -158,6 +158,37 @@
       </div>
 
       <div class="card overflow-hidden !rounded-3xl !border-0 shadow-sm ring-1 ring-gray-900/5 dark:!bg-dark-800 dark:ring-dark-700">
+        <div class="card-header flex items-center justify-between gap-4 !py-3">
+          <div>
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('channelMonitorV2.settings.displayGroupsTitle') }}</h3>
+            <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('channelMonitorV2.settings.displayGroupsHint') }}</p>
+          </div>
+          <button type="button" class="btn btn-secondary shrink-0" @click="addDisplayGroup">{{ t('channelMonitorV2.settings.displayGroupsAdd') }}</button>
+        </div>
+        <div class="space-y-4 p-4">
+          <p v-if="!draft.display_groups?.length" class="text-sm text-gray-400">{{ t('channelMonitorV2.settings.displayGroupsEmpty') }}</p>
+          <div v-for="(item, index) in draft.display_groups" :key="item.id" class="space-y-3 rounded-xl border border-gray-200 p-3 dark:border-dark-600">
+            <div class="flex items-center gap-3">
+              <input v-model="item.name" class="input flex-1" maxlength="100" :aria-label="t('channelMonitorV2.settings.displayGroupsName')" :placeholder="t('channelMonitorV2.settings.displayGroupsName')" />
+              <button type="button" class="btn btn-secondary" @click="draft.display_groups?.splice(index, 1)">{{ t('channelMonitorV2.settings.displayGroupsRemove') }}</button>
+            </div>
+            <div class="grid max-h-52 grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2">
+              <label v-for="group in displayGroupOptions" :key="group.id" class="flex items-center gap-2 text-sm">
+                <input v-model="item.group_ids" type="checkbox" :value="group.id" :disabled="displayGroupMemberTaken(item.id, group.id)" />
+                <span>{{ group.name }} <small class="text-gray-400">{{ platformLabel(group.platform) }} · #{{ group.id }}</small></span>
+              </label>
+            </div>
+            <div v-if="item.group_ids.some(id => !displayGroupOptions.some(group => group.id === id))" class="space-y-2 text-sm text-amber-600">
+              <p>{{ t('channelMonitorV2.settings.displayGroupsInvalidMembers') }}</p>
+              <button v-for="id in item.group_ids.filter(id => !displayGroupOptions.some(group => group.id === id))" :key="id" type="button" class="btn btn-secondary mr-2" @click="item.group_ids = item.group_ids.filter(member => member !== id)">
+                {{ t('channelMonitorV2.settings.displayGroupsRemove') }} #{{ id }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card overflow-hidden !rounded-3xl !border-0 shadow-sm ring-1 ring-gray-900/5 dark:!bg-dark-800 dark:ring-dark-700">
         <div class="card-header !py-3">
           <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('channelMonitorV2.settings.errorsTitle') }}</h3>
           <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
@@ -286,6 +317,18 @@ const draft = ref<MonitorConfig | null>(null)
 const original = ref('')
 const groups = ref<AdminGroup[]>([])
 
+const displayGroupOptions = computed(() => groups.value.filter(group =>
+  !draft.value?.group_ids.length || draft.value.group_ids.includes(group.id)
+))
+function addDisplayGroup() {
+  if (!draft.value) return
+  draft.value.display_groups ??= []
+  draft.value.display_groups.push({ id: `display-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, name: '', group_ids: [] })
+}
+function displayGroupMemberTaken(displayID: string, groupID: number) {
+  return draft.value?.display_groups?.some(group => group.id !== displayID && group.group_ids.includes(groupID)) ?? false
+}
+
 const dirty = computed(() => (draft.value ? JSON.stringify(draft.value) !== original.value : false))
 const namedModelCount = computed(
   () => draft.value?.platforms.filter((p) => p.enabled).reduce((sum, p) => sum + p.models.length, 0) || 0
@@ -401,6 +444,7 @@ function normalizeConfig(value: MonitorConfig): MonitorConfig {
   const ignored = value.ignored_error_categories
   return {
     ...value,
+    display_groups: value.display_groups || [],
     retention_period: value.retention_period || '30d',
     // Preserve saved/custom platforms and expose missing providers as disabled.
     platforms: [
@@ -434,6 +478,12 @@ async function load() {
 
 async function save() {
   if (!draft.value) return
+  const displayGroups = draft.value.display_groups || []
+  const names = displayGroups.map(group => group.name.trim())
+  if (displayGroups.some(group => !group.name.trim() || !group.group_ids.length || group.group_ids.some(id => !displayGroupOptions.value.some(option => option.id === id))) || new Set(names).size !== names.length) {
+    appStore.showError(t('channelMonitorV2.settings.displayGroupsInvalid'))
+    return
+  }
   saving.value = true
   try {
     const payload = normalizeConfig(draft.value)
@@ -444,7 +494,11 @@ async function save() {
     appStore.showSuccess(t('channelMonitorV2.settings.saveSuccess'))
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error, t('channelMonitorV2.settings.saveFailed')))
-    await load()
+    // apiClient normalizes HTTP failures to a top-level status. Reload the
+    // full configuration on conflict so stale edits cannot overwrite newer changes.
+    if ((error as { status?: number } | null)?.status === 409) {
+      await load()
+    }
   } finally {
     saving.value = false
   }

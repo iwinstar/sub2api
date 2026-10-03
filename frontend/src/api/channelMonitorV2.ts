@@ -99,7 +99,14 @@ export interface MonitorCoverage {
   bootstrap?: MonitorBootstrap | null
 }
 
+export interface MonitorDisplayGroup {
+  id: string
+  name: string
+  group_ids: number[]
+}
+
 export interface MonitorConfig {
+  display_groups?: MonitorDisplayGroup[]
   version: number
   enabled: boolean
   refresh_interval_seconds: 60 | 300
@@ -162,6 +169,7 @@ export interface MonitorMatrixBucket {
 
 export interface MonitorMatrixRow {
   platform: string
+  display_group_id?: string
   group_id?: number
   group_name?: string
   model?: string

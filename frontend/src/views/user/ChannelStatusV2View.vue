@@ -657,9 +657,9 @@ const bootstrapPercent = computed(() => {
 })
 const matrixRows = computed(() => {
   const items = matrix.value?.items || []
-  // platform_group views should only show real groups, never bare platform placeholders.
+  // Group views include original and display groups, never bare platform placeholders.
   if (matrixGroupBy.value === 'platform_group' || matrixGroupBy.value === 'platform_group_model') {
-    return items.filter((row) => row.group_id != null && Number(row.group_id) > 0)
+    return items.filter((row) => Boolean(row.display_group_id) || (row.group_id != null && Number(row.group_id) > 0))
   }
   return items
 })
