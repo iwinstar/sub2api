@@ -58,8 +58,11 @@ func TestChannelMonitorV2DirectFiveMinuteAggregation(t *testing.T) {
 		var failures, samples int64
 		require.NoError(t, tx.QueryRowContext(ctx, `SELECT SUM(error_requests) FROM channel_monitor_v2_error_metrics_rollup WHERE bucket_seconds=$1 AND bucket_start=$2`, seconds, start).Scan(&failures))
 		require.Equal(t, wantErrors, failures)
-		require.NoError(t, tx.QueryRowContext(ctx, `SELECT SUM(sample_count) FROM channel_monitor_v2_latency_histograms_rollup WHERE bucket_seconds=$1 AND bucket_start=$2 AND user_id=7 AND metric='ttft'`, seconds, start).Scan(&samples))
+		require.NoError(t, tx.QueryRowContext(ctx, `SELECT SUM(sample_count) FROM channel_monitor_v2_latency_histograms_rollup WHERE bucket_seconds=$1 AND bucket_start=$2 AND user_id=0 AND metric='ttft'`, seconds, start).Scan(&samples))
 		require.Equal(t, wantSuccess, samples)
+		var personalRows int
+		require.NoError(t, tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_monitor_v2_latency_histograms_rollup WHERE user_id > 0`).Scan(&personalRows))
+		require.Zero(t, personalRows)
 	}
 	// Walk backwards, pruning historical 5m data after each full-hour chunk.
 	for hour := 1; hour >= 0; hour-- {

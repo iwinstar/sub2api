@@ -214,14 +214,13 @@ INSERT INTO channel_monitor_v2_latency_histograms_rollup (
   bucket_start, platform, group_id, model, user_id, metric, upper_bound_ms, sample_count, bucket_seconds
 )
 SELECT date_bin(INTERVAL '5 minutes', ul.created_at, ` + channelMonitorV2DateBinOrigin + `), %s, COALESCE(ul.group_id, 0), %s,
-       audience.user_id, latency.metric, %s, COUNT(*), 300
+       0::bigint, latency.metric, %s, COUNT(*), 300
 FROM usage_logs ul
 LEFT JOIN groups g ON g.id = ul.group_id
 LEFT JOIN accounts a ON a.id = ul.account_id
-CROSS JOIN LATERAL (VALUES (0::bigint), (ul.user_id)) audience(user_id)
 CROSS JOIN LATERAL (VALUES ('ttft'::text, ul.first_token_ms), ('duration'::text, ul.duration_ms)) latency(metric, value_ms)
 WHERE ul.created_at >= $1 AND ul.created_at < $2
-  AND audience.user_id IS NOT NULL AND latency.value_ms IS NOT NULL AND latency.value_ms >= 0
+  AND latency.value_ms IS NOT NULL AND latency.value_ms >= 0
   AND ` + usageLogSuccessFilterUL + `
 GROUP BY 1, 2, 3, 4, 5, 6, 7`
 
@@ -452,6 +451,7 @@ SELECT date_bin($1::interval, h.bucket_start, ` + channelMonitorV2DateBinOrigin 
        platform, group_id, model, user_id, metric, upper_bound_ms, SUM(sample_count)
 FROM channel_monitor_v2_latency_histograms_rollup h, bounds
 WHERE h.bucket_seconds = CASE WHEN $2::integer = 3600 THEN 300 ELSE 3600 END
+  AND h.user_id = 0
   AND h.bucket_start >= bounds.start_at AND h.bucket_start < bounds.end_at
 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8`
 

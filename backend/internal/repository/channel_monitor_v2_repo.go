@@ -1002,18 +1002,6 @@ func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter servic
 		accs[uid].addFact(f)
 		meta[uid] = userMeta{email, username}
 	}
-	histograms, err := r.loadHistograms(ctx, filter, cfg, -1, false)
-	if err != nil {
-		return nil, err
-	}
-	for _, histogram := range histograms {
-		if !channelMonitorV2ModelSelected(filter, cfg, histogram.Platform, histogram.Model) {
-			continue
-		}
-		if acc := accs[histogram.UserID]; acc != nil {
-			acc.addHistogram(histogram)
-		}
-	}
 	// Error category facts are not per-user. Approximate ignored-error impact by
 	// applying the window-level ignored/error ratio to each user's error count so
 	// user-rank rates stay consistent with overview scoring.

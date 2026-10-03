@@ -567,3 +567,28 @@ func TestChannelMonitorV2ReadsOnlyRollupTables(t *testing.T) {
 		require.Equal(t, seconds, args[len(args)-1])
 	}
 }
+
+func TestChannelMonitorV2GetUsersUsesAverageWithoutUserHistograms(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	r := &channelMonitorV2Repository{db: db}
+	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute)
+	end := start.Add(time.Hour)
+	mock.ExpectQuery("SELECT usage_coverage_start").WillReturnRows(sqlmock.NewRows([]string{
+		"usage_coverage_start", "error_coverage_start", "data_through", "last_successful_at", "backfill_cursor",
+	}).AddRow(start, start, end, end, start))
+	mock.ExpectQuery("SELECT m\\.user_id").WillReturnRows(sqlmock.NewRows([]string{
+		"user_id", "email", "username", "platform", "model", "success_requests", "error_requests",
+		"input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "ttft_sum_ms",
+		"ttft_count", "duration_sum_ms", "duration_count",
+	}).AddRow(7, "user@example.com", "user", "openai", "gpt-5", 2, 0, 10, 20, 0, 0, 200, 2, 1000, 2))
+	result, err := r.GetUsers(context.Background(), service.ChannelMonitorV2Filter{Start: start, End: end, Bucket: time.Hour}, service.ChannelMonitorV2Config{}, true)
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	require.Equal(t, float64(100), *result.Items[0].Metrics.TTFT.AvgMs)
+	require.Nil(t, result.Items[0].Metrics.TTFT.P50Ms)
+	require.Nil(t, result.Items[0].Metrics.TTFT.P90Ms)
+	require.Nil(t, result.Items[0].Metrics.TTFT.P95Ms)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

@@ -43,6 +43,7 @@ export default {
       errorRate: 'Error rate',
       ttft: 'First token',
       ttftP50: 'First token P50',
+      ttftAvg: 'First token AVG',
       durationP50: 'Duration P50',
       cacheRate: 'Cache rate',
       cacheDetail: 'Read cache share',

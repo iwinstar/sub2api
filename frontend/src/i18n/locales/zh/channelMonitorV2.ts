@@ -43,6 +43,7 @@ export default {
       errorRate: '错误率',
       ttft: '首 Token',
       ttftP50: '首 Token P50',
+      ttftAvg: '首 Token AVG',
       durationP50: '请求时长 P50',
       cacheRate: '缓存率',
       cacheDetail: '读缓存占比',

@@ -391,7 +391,7 @@
                   <th class="w-16">{{ t('channelMonitorV2.table.rank') }}</th>
                   <th>{{ t('channelMonitorV2.table.user') }}</th>
                   <th>{{ t('channelMonitorV2.metrics.successRate') }}</th>
-                  <th>{{ t('channelMonitorV2.metrics.ttftP50') }}</th>
+                  <th>{{ t('channelMonitorV2.metrics.ttftAvg') }}</th>
                   <th v-if="showThroughput">{{ t('channelMonitorV2.metrics.tps') }}</th>
                   <th>{{ t('channelMonitorV2.metrics.cacheRate') }}</th>
                   <th v-if="showThroughput">{{ t('channelMonitorV2.metrics.rpm') }}</th>
@@ -423,8 +423,7 @@
                     <small class="text-xs text-gray-400">{{ t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(row.metrics.error_rate) }) }}</small>
                   </td>
                   <td>
-                    <span class="block">{{ formatMs(row.metrics.ttft.p50_ms) }}</span>
-                    <small class="text-xs text-gray-400">{{ latencyDetail(row.metrics.ttft) }}</small>
+                    <span class="block">{{ formatMs(row.metrics.ttft.avg_ms) }}</span>
                   </td>
                   <td v-if="showThroughput" :title="exactTps(row.metrics.tpm)">{{ formatTps(row.metrics.tpm) }}</td>
                   <td>{{ formatPercent(row.metrics.cache_rate) }}</td>
