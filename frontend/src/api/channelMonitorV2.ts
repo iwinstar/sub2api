@@ -1,6 +1,7 @@
 import { apiClient } from './client'
 
 export type MonitorRange = '120m' | '24h' | '7d' | '30d'
+export type MonitorRetentionPeriod = '24h' | '7d' | '30d'
 export type HealthState = 'unknown' | 'healthy' | 'warning' | 'critical'
 /** Fine-grained score band for multi-stop green→yellow→red gradients (score0..score10). */
 export type HealthScoreBand =
@@ -102,6 +103,7 @@ export interface MonitorConfig {
   version: number
   enabled: boolean
   refresh_interval_seconds: 60 | 300
+  retention_period: MonitorRetentionPeriod
   platforms: Array<{ platform: string; enabled: boolean; models: string[] }>
   group_ids: number[]
   health_thresholds: {

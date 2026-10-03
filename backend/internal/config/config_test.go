@@ -1135,6 +1135,18 @@ func TestLoadDefaultDashboardAggregationConfig(t *testing.T) {
 	if cfg.DashboardAgg.RecomputeDays != 2 {
 		t.Fatalf("DashboardAgg.RecomputeDays = %d, want 2", cfg.DashboardAgg.RecomputeDays)
 	}
+	if cfg.DashboardAgg.ChannelMonitorV2RetentionPeriod != "m" {
+		t.Fatalf("DashboardAgg.ChannelMonitorV2RetentionPeriod = %q, want m", cfg.DashboardAgg.ChannelMonitorV2RetentionPeriod)
+	}
+}
+
+func TestChannelMonitorV2RetentionDuration(t *testing.T) {
+	if ChannelMonitorV2RetentionDuration("d") != "24h" || ChannelMonitorV2RetentionDuration("w") != "7d" || ChannelMonitorV2RetentionDuration("m") != "30d" {
+		t.Fatal("V2 retention tiers did not map to fixed time windows")
+	}
+	if ChannelMonitorV2RetentionDuration("invalid") != "" {
+		t.Fatal("invalid V2 retention tier should be rejected")
+	}
 }
 
 func TestValidateDashboardAggregationConfigDisabled(t *testing.T) {
@@ -2676,5 +2688,14 @@ func TestLoadSimpleModeAutoCreateDefaultGroups(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestChannelMonitorV2InvalidRetentionConfig(t *testing.T) {
+	c := &Config{}
+	c.DashboardAgg.ChannelMonitorV2RetentionPeriod = "weekly"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "channel_monitor_v2_retention_period") {
+		t.Fatalf("expected invalid retention config, got %v", err)
 	}
 }

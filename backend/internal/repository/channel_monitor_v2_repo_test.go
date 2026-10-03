@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -335,23 +336,23 @@ func TestChannelMonitorV2HistoryCoverageCompleteIgnoresTrailingLag(t *testing.T)
 }
 
 func TestChannelMonitorV2TierRetentionPolicy(t *testing.T) {
-	require.Equal(t, 3*24*time.Hour, channelMonitorV2RetentionUser1m)
-	require.Equal(t, 7*24*time.Hour, channelMonitorV2RetentionMetrics1m)
-	require.Equal(t, 7*24*time.Hour, channelMonitorV2RetentionError1m)
-	require.Equal(t, 7*24*time.Hour, channelMonitorV2RetentionHistogram1m)
-	require.Equal(t, 7*24*time.Hour, channelMonitorV2RetentionRollup5m)
-	require.Equal(t, 30*24*time.Hour, channelMonitorV2RetentionRollup1h)
-	require.Equal(t, 45*24*time.Hour, channelMonitorV2RetentionRollup12h)
-	require.Equal(t, 90*24*time.Hour, channelMonitorV2RetentionRollup1d)
-	require.Equal(t, channelMonitorV2RetentionRollup1d, channelMonitorV2MaxRetention())
-	require.Contains(t, channelMonitorV2WatermarkSQL, "INTERVAL '90 days'")
+	require.Equal(t, 180*time.Minute, channelMonitorV2RetentionRollup5m)
+	require.Equal(t, 31*24*time.Hour, channelMonitorV2RetentionRollupLong)
+	require.Equal(t, channelMonitorV2RetentionRollupLong, channelMonitorV2MaxRetention())
+	require.Contains(t, channelMonitorV2WatermarkSQL, "INTERVAL '31 days'")
+	require.Equal(t, 48*time.Hour, channelMonitorV2RollupRetention("d"))
+	require.Equal(t, 8*24*time.Hour, channelMonitorV2RollupRetention("w"))
+	require.Equal(t, 31*24*time.Hour, channelMonitorV2RollupRetention("m"))
+	require.Equal(t, 48*time.Hour, channelMonitorV2RollupRetention("24h"))
+	require.Equal(t, 8*24*time.Hour, channelMonitorV2RollupRetention("7d"))
+	require.Equal(t, 31*24*time.Hour, channelMonitorV2RollupRetention("30d"))
 
 	// Every fixed rollup second must appear with a retention rule.
 	wantSeconds := map[int]time.Duration{
 		300:   channelMonitorV2RetentionRollup5m,
-		3600:  channelMonitorV2RetentionRollup1h,
-		43200: channelMonitorV2RetentionRollup12h,
-		86400: channelMonitorV2RetentionRollup1d,
+		3600:  channelMonitorV2RetentionRollupLong,
+		43200: channelMonitorV2RetentionRollupLong,
+		86400: channelMonitorV2RetentionRollupLong,
 	}
 	seen := map[int]time.Duration{}
 	for _, rule := range channelMonitorV2RetentionRules {
@@ -371,8 +372,7 @@ func TestChannelMonitorV2TierRetentionPolicy(t *testing.T) {
 	}
 
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
-	require.Equal(t, now.Add(-7*24*time.Hour), channelMonitorV2RetentionCutoff(now, channelMonitorV2RetentionMetrics1m))
-	require.Equal(t, now.Add(-90*24*time.Hour), channelMonitorV2RetentionCutoff(now, channelMonitorV2MaxRetention()))
+	require.Equal(t, now.Add(-31*24*time.Hour), channelMonitorV2RetentionCutoff(now, channelMonitorV2MaxRetention()))
 }
 
 func TestSameFixedRollupBucket(t *testing.T) {
@@ -482,4 +482,88 @@ func TestChannelMonitorV2CatalogFilterClearsMultiSelectDimensions(t *testing.T) 
 	// Group seeding without multi-select uses full config allow-list.
 	require.Equal(t, []int64{3, 4}, configuredChannelMonitorV2GroupIDs(catalog, cfg))
 	require.Equal(t, []int64{3}, configuredChannelMonitorV2GroupIDs(filter, cfg))
+}
+
+func TestChannelMonitorV2RollupSourcesAndRefreshBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		start, end time.Time
+		coarse     bool
+	}{
+		{"recent", time.Date(2026, 10, 3, 12, 10, 0, 0, time.UTC), time.Date(2026, 10, 3, 12, 20, 0, 0, time.UTC), false},
+		{"hour boundary", time.Date(2026, 10, 3, 12, 55, 0, 0, time.UTC), time.Date(2026, 10, 3, 13, 5, 0, 0, time.UTC), true},
+		{"historical hour", time.Date(2026, 9, 3, 14, 0, 0, 0, time.UTC), time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			mock.ExpectBegin()
+			tx, err := db.Begin()
+			require.NoError(t, err)
+			for _, seconds := range []int{3600, 43200, 86400} {
+				if seconds >= 43200 && !tc.coarse {
+					continue
+				}
+				interval := fmt.Sprintf("%d seconds", seconds)
+				for _, table := range []string{"latency_histograms", "error_metrics", "user_metrics", "metrics"} {
+					mock.ExpectExec("DELETE FROM channel_monitor_v2_"+table+"_rollup").WithArgs(interval, seconds, tc.start, tc.end).WillReturnResult(sqlmock.NewResult(0, 1))
+				}
+				for _, source := range []struct{ table, alias string }{{"metrics", "m"}, {"user_metrics", "m"}, {"latency_histograms", "h"}, {"error_metrics", "e"}} {
+					pattern := fmt.Sprintf("FROM channel_monitor_v2_%s_rollup %s, bounds\\s+WHERE %s.bucket_seconds = CASE WHEN", source.table, source.alias, source.alias)
+					mock.ExpectExec(pattern).WithArgs(interval, seconds, tc.start, tc.end).WillReturnResult(sqlmock.NewResult(0, 1))
+				}
+			}
+			mock.ExpectCommit()
+			r := &channelMonitorV2Repository{}
+			require.NoError(t, r.recomputeFixedRollups(context.Background(), tx, tc.start, tc.end))
+			require.NoError(t, tx.Commit())
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestChannelMonitorV2RecentRefreshAlignsOnlyToFiveMinutes(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	end := time.Now().UTC().Truncate(time.Hour).Add(23 * time.Minute)
+	requestedStart := end.Add(-10 * time.Minute)
+	start := requestedStart.Truncate(5 * time.Minute)
+	mock.ExpectBegin()
+	for _, table := range []string{"latency_histograms", "error_metrics", "user_metrics", "metrics"} {
+		mock.ExpectExec("DELETE FROM channel_monitor_v2_"+table+"_rollup WHERE bucket_seconds = 300").WithArgs(start, end).WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	for i := 0; i < 4; i++ {
+		mock.ExpectExec(".+").WithArgs(start, end).WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	for _, seconds := range []int{3600} {
+		for i := 0; i < 8; i++ {
+			mock.ExpectExec(".+").WithArgs(fmt.Sprintf("%d seconds", seconds), seconds, start, end).WillReturnResult(sqlmock.NewResult(0, 1))
+		}
+	}
+	for _, rule := range channelMonitorV2RetentionRules {
+		mock.ExpectExec("DELETE FROM " + rule.table).WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	for _, table := range channelMonitorV2LegacyTables {
+		mock.ExpectExec("DELETE FROM " + table + "$").WithArgs().WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	mock.ExpectExec("INSERT INTO channel_monitor_v2_watermarks").WithArgs(start, end).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	r := &channelMonitorV2Repository{db: db}
+	require.NoError(t, r.RecomputeRange(context.Background(), requestedStart, end))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChannelMonitorV2ReadsOnlyRollupTables(t *testing.T) {
+	for _, bucket := range []time.Duration{0, time.Minute, 5 * time.Minute, time.Hour, 12 * time.Hour, 24 * time.Hour} {
+		filter := service.ChannelMonitorV2Filter{Bucket: bucket}
+		for _, table := range []string{channelMonitorV2MetricsTable(filter), channelMonitorV2UserMetricsTable(filter), channelMonitorV2ErrorMetricsTable(filter), channelMonitorV2HistogramTable(filter)} {
+			require.True(t, strings.HasSuffix(table, "_rollup"))
+		}
+		where, args, seconds := channelMonitorV2WhereWithRollup(filter, service.ChannelMonitorV2Config{}, "m")
+		require.GreaterOrEqual(t, seconds, 300)
+		require.Contains(t, where, "m.bucket_seconds =")
+		require.Equal(t, seconds, args[len(args)-1])
+	}
 }

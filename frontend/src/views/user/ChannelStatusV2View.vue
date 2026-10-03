@@ -516,12 +516,15 @@ const showThroughput = computed(() => isAdmin.value || !isChannelMonitorThroughp
 /** Admins always see ranking; users honor the hide-user-ranking system setting. */
 const showUserRanking = computed(() => isAdmin.value || !isChannelMonitorUserRankingHidden())
 
-const ranges = computed(() => [
-  { value: '120m' as MonitorRange, label: t('channelMonitorV2.ranges.120m') },
-  { value: '24h' as MonitorRange, label: t('channelMonitorV2.ranges.24h') },
-  { value: '7d' as MonitorRange, label: t('channelMonitorV2.ranges.7d') },
-  { value: '30d' as MonitorRange, label: t('channelMonitorV2.ranges.30d') },
-])
+const ranges = computed(() => {
+  const period = snapshot.value?.config?.retention_period || '30d'
+  const allowed: MonitorRange[] = period === '24h'
+    ? ['120m', '24h']
+    : period === '7d'
+      ? ['120m', '24h', '7d']
+      : ['120m', '24h', '7d', '30d']
+  return allowed.map((value) => ({ value, label: t(`channelMonitorV2.ranges.${value}`) }))
+})
 const tabs = computed(() => {
   const items: Array<{ value: Tab; label: string }> = [
     { value: 'models', label: t('channelMonitorV2.tabs.models') },
@@ -724,6 +727,9 @@ async function loadMetrics(signal?: AbortSignal, id = sequence) {
   if (id !== sequence) return
   snapshot.value = nextSnapshot
   matrix.value = nextMatrix
+  if (!ranges.value.some((item) => item.value === filter.value.range)) {
+    filter.value.range = ranges.value[ranges.value.length - 1]?.value || '120m'
+  }
   scheduleAutoRefresh()
   await loadTab(signal, id)
 }
@@ -797,7 +803,7 @@ async function loadTab(signal?: AbortSignal, id = sequence) {
   }
 }
 function setRange(value: MonitorRange) {
-  filter.value.range = value
+  if (ranges.value.some((item) => item.value === value)) filter.value.range = value
 }
 function clearDimensions() {
   // Replace arrays so deep watch always fires and metrics reload full window.

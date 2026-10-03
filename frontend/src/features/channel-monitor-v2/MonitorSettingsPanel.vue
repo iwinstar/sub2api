@@ -401,6 +401,7 @@ function normalizeConfig(value: MonitorConfig): MonitorConfig {
   const ignored = value.ignored_error_categories
   return {
     ...value,
+    retention_period: value.retention_period || '30d',
     // Preserve saved/custom platforms and expose missing providers as disabled.
     platforms: [
       ...value.platforms,

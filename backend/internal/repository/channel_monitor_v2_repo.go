@@ -9,14 +9,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 )
 
-type channelMonitorV2Repository struct{ db *sql.DB }
+type channelMonitorV2Repository struct {
+	db              *sql.DB
+	retentionPeriod string
+}
 
-func NewChannelMonitorV2Repository(db *sql.DB) service.ChannelMonitorV2Repository {
-	return &channelMonitorV2Repository{db: db}
+func NewChannelMonitorV2Repository(db *sql.DB, cfg *config.Config) service.ChannelMonitorV2Repository {
+	period := "30d"
+	if cfg != nil {
+		if configured := config.ChannelMonitorV2RetentionDuration(cfg.DashboardAgg.ChannelMonitorV2RetentionPeriod); configured != "" {
+			period = configured
+		}
+	}
+	return &channelMonitorV2Repository{db: db, retentionPeriod: period}
 }
 
 func (r *channelMonitorV2Repository) GetConfig(ctx context.Context) (*service.ChannelMonitorV2Config, error) {
@@ -1119,36 +1129,24 @@ func channelMonitorV2FixedBucketSeconds(filter service.ChannelMonitorV2Filter) i
 	case 300, 3600, 43200, 86400:
 		return seconds
 	default:
-		return 0
+		return 300
 	}
 }
 
 func channelMonitorV2MetricsTable(filter service.ChannelMonitorV2Filter) string {
-	if channelMonitorV2FixedBucketSeconds(filter) > 0 {
-		return "channel_monitor_v2_metrics_rollup"
-	}
-	return "channel_monitor_v2_metrics_1m"
+	return "channel_monitor_v2_metrics_rollup"
 }
 
 func channelMonitorV2UserMetricsTable(filter service.ChannelMonitorV2Filter) string {
-	if channelMonitorV2FixedBucketSeconds(filter) > 0 {
-		return "channel_monitor_v2_user_metrics_rollup"
-	}
-	return "channel_monitor_v2_user_metrics_1m"
+	return "channel_monitor_v2_user_metrics_rollup"
 }
 
 func channelMonitorV2ErrorMetricsTable(filter service.ChannelMonitorV2Filter) string {
-	if channelMonitorV2FixedBucketSeconds(filter) > 0 {
-		return "channel_monitor_v2_error_metrics_rollup"
-	}
-	return "channel_monitor_v2_error_metrics_1m"
+	return "channel_monitor_v2_error_metrics_rollup"
 }
 
 func channelMonitorV2HistogramTable(filter service.ChannelMonitorV2Filter) string {
-	if channelMonitorV2FixedBucketSeconds(filter) > 0 {
-		return "channel_monitor_v2_latency_histograms_rollup"
-	}
-	return "channel_monitor_v2_latency_histograms_1m"
+	return "channel_monitor_v2_latency_histograms_rollup"
 }
 
 func channelMonitorV2WhereWithRollup(filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, alias string) (string, []any, int) {

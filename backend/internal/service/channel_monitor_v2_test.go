@@ -170,6 +170,7 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	}
 	require.NoError(t, normalizeChannelMonitorV2Config(&cfg))
 	require.Equal(t, 300, cfg.RefreshIntervalSeconds)
+	require.Equal(t, "30d", cfg.RetentionPeriod)
 	require.Equal(t, "anthropic", cfg.Platforms[0].Platform)
 	require.Equal(t, []int64{1, 3}, cfg.GroupIDs)
 
@@ -177,6 +178,9 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
 
 	cfg.RefreshIntervalSeconds = 60
+	cfg.RetentionPeriod = "14d"
+	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
+	cfg.RetentionPeriod = "7d"
 	cfg.GroupIDs = []int64{0}
 	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
 }

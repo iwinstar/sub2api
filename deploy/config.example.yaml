@@ -786,6 +786,9 @@ dashboard_aggregation:
     # Daily aggregation retention
     # 日聚合保留天数
     daily_days: 730
+  # Channel Monitor V2 history window: set d (24h), w (7d), or m (30d, default); restart required.
+  # V2 监控历史汇总周期：填写 d（24 小时）、w（7 天）或 m（30 天，默认）；重启生效。
+  channel_monitor_v2_retention_period: m
 
 # =============================================================================
 # Usage Cleanup Task Configuration

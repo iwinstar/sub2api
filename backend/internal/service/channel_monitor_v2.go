@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
 const (
@@ -40,6 +42,7 @@ type ChannelMonitorV2Config struct {
 	Version                int                              `json:"version"`
 	Enabled                bool                             `json:"enabled"`
 	RefreshIntervalSeconds int                              `json:"refresh_interval_seconds"`
+	RetentionPeriod        string                           `json:"retention_period"`
 	Platforms              []ChannelMonitorV2PlatformConfig `json:"platforms"`
 	GroupIDs               []int64                          `json:"group_ids"`
 	HealthThresholds       ChannelMonitorV2HealthThresholds `json:"health_thresholds"`
@@ -376,13 +379,23 @@ func ChannelMonitorV2BootstrapProgress(now, coveredFrom time.Time, hasData bool)
 }
 
 type ChannelMonitorV2Service struct {
-	repo     ChannelMonitorV2Repository
-	settings channelMonitorRuntimeReader
-	now      func() time.Time
+	repo            ChannelMonitorV2Repository
+	settings        channelMonitorRuntimeReader
+	retentionPeriod string
+	now             func() time.Time
 }
 
 func NewChannelMonitorV2Service(repo ChannelMonitorV2Repository) *ChannelMonitorV2Service {
-	return &ChannelMonitorV2Service{repo: repo, now: func() time.Time { return time.Now().UTC() }}
+	return &ChannelMonitorV2Service{repo: repo, retentionPeriod: "30d", now: func() time.Time { return time.Now().UTC() }}
+}
+
+func (s *ChannelMonitorV2Service) SetRetentionPeriod(cfg *config.Config) {
+	if s == nil || cfg == nil {
+		return
+	}
+	if period := config.ChannelMonitorV2RetentionDuration(cfg.DashboardAgg.ChannelMonitorV2RetentionPeriod); period != "" {
+		s.retentionPeriod = period
+	}
 }
 
 // SetRuntimeReader wires optional settings for privacy flags (hide throughput).
@@ -418,7 +431,11 @@ func (s *ChannelMonitorV2Service) hideUserRankingForViewer(ctx context.Context, 
 }
 
 func (s *ChannelMonitorV2Service) GetConfig(ctx context.Context) (*ChannelMonitorV2Config, error) {
-	return s.repo.GetConfig(ctx)
+	cfg, err := s.repo.GetConfig(ctx)
+	if err == nil && cfg != nil {
+		cfg.RetentionPeriod = s.retentionPeriod
+	}
+	return cfg, err
 }
 
 func (s *ChannelMonitorV2Service) getEnabledConfig(ctx context.Context) (*ChannelMonitorV2Config, error) {
@@ -429,10 +446,12 @@ func (s *ChannelMonitorV2Service) getEnabledConfig(ctx context.Context) (*Channe
 	if cfg == nil || !cfg.Enabled {
 		return nil, ErrChannelMonitorDisabled
 	}
+	cfg.RetentionPeriod = s.retentionPeriod
 	return cfg, nil
 }
 
 func (s *ChannelMonitorV2Service) UpdateConfig(ctx context.Context, cfg ChannelMonitorV2Config, expectedVersion int, actorID int64) (*ChannelMonitorV2Config, error) {
+	cfg.RetentionPeriod = s.retentionPeriod
 	if err := normalizeChannelMonitorV2Config(&cfg); err != nil {
 		return nil, err
 	}
@@ -748,6 +767,12 @@ func channelMonitorV2TopUsersWithSelf(items []ChannelMonitorV2UserRow, selfIndex
 }
 
 func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
+	if cfg.RetentionPeriod == "" {
+		cfg.RetentionPeriod = "30d"
+	}
+	if cfg.RetentionPeriod != "24h" && cfg.RetentionPeriod != "7d" && cfg.RetentionPeriod != "30d" {
+		return fmt.Errorf("%w: retention_period must be 24h, 7d, or 30d", ErrChannelMonitorV2InvalidConfig)
+	}
 	if cfg.RefreshIntervalSeconds == 0 {
 		cfg.RefreshIntervalSeconds = 300
 	}

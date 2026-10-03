@@ -1775,7 +1775,35 @@ type DashboardAggregationConfig struct {
 	// Retention: 各表保留窗口（天）
 	Retention DashboardAggregationRetentionConfig `mapstructure:"retention"`
 	// RecomputeDays: 启动时重算最近 N 天
-	RecomputeDays int `mapstructure:"recompute_days"`
+	RecomputeDays                   int    `mapstructure:"recompute_days"`
+	ChannelMonitorV2RetentionPeriod string `mapstructure:"channel_monitor_v2_retention_period"`
+}
+
+// ChannelMonitorV2RetentionDuration maps the fixed retention tier configured
+// in dashboard_aggregation to the runtime window used by V2.
+func ChannelMonitorV2RetentionDuration(tier string) string {
+	switch tier {
+	case "d":
+		return "24h"
+	case "w":
+		return "7d"
+	case "m", "":
+		return "30d"
+	default:
+		return ""
+	}
+}
+
+// ChannelMonitorV2StoredRetention includes one day of rebuilding headroom.
+func ChannelMonitorV2StoredRetention(period string) time.Duration {
+	switch period {
+	case "d", "24h":
+		return 48 * time.Hour
+	case "w", "7d":
+		return 8 * 24 * time.Hour
+	default:
+		return 31 * 24 * time.Hour
+	}
 }
 
 // DashboardAggregationRetentionConfig 预聚合保留窗口
@@ -2299,6 +2327,9 @@ func setDefaults() {
 	viper.SetDefault("image_storage.secret_access_key", "")
 	viper.SetDefault("image_storage.public_base_url", "")
 
+	// Channel Monitor V2 history window (restart required).
+	viper.SetDefault("dashboard_aggregation.channel_monitor_v2_retention_period", "m")
+
 	// Ops (vNext)
 	viper.SetDefault("ops.enabled", true)
 	viper.SetDefault("ops.use_preaggregated_tables", true)
@@ -2703,6 +2734,9 @@ func setEnvReachableDefaults() {
 }
 
 func (c *Config) Validate() error {
+	if ChannelMonitorV2RetentionDuration(c.DashboardAgg.ChannelMonitorV2RetentionPeriod) == "" {
+		return fmt.Errorf("dashboard_aggregation.channel_monitor_v2_retention_period must be d, w, or m")
+	}
 	if err := c.Redis.ValidateUnix(); err != nil {
 		return err
 	}

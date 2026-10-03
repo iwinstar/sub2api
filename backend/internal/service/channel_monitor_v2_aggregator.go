@@ -6,15 +6,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/google/uuid"
 )
 
 const (
 	channelMonitorV2AggregatorLockKey = "channel-monitor-v2-aggregator"
-	// Retention walks back to the longest stored tier (1d rollup = 90d). Per-tier
-	// prune in the repository drops short-lived 1m/user/hist facts earlier.
-	channelMonitorV2RetentionMax = 90 * 24 * time.Hour
 	// First tick after upgrade prioritizes the default 120m view (with small padding).
 	channelMonitorV2BootstrapFirst = 2 * time.Hour
 	// Always refresh a small trailing window so late writes land without
@@ -25,7 +23,7 @@ const (
 	// Initial historical chunk after the 2h seed.
 	channelMonitorV2BackfillChunkInit = time.Hour
 	channelMonitorV2MinBackfillChunk  = 15 * time.Minute
-	// Depth-based ceilings (product phases 120m → 1d → 7d → 30d → 90d).
+	// Depth-based ceilings (product phases 120m → 1d → 7d → 30d).
 	channelMonitorV2MaxChunkNear1d = 2 * time.Hour
 	channelMonitorV2MaxChunkNear7d = 4 * time.Hour
 	channelMonitorV2MaxChunkFar    = 6 * time.Hour
@@ -42,11 +40,12 @@ type channelMonitorRuntimeSubscriber interface {
 }
 
 type ChannelMonitorV2Aggregator struct {
-	repo       ChannelMonitorV2Repository
-	db         *sql.DB
-	settings   channelMonitorRuntimeReader
-	instanceID string
-	stopCh     chan struct{}
+	repo            ChannelMonitorV2Repository
+	db              *sql.DB
+	settings        channelMonitorRuntimeReader
+	retentionPeriod string
+	instanceID      string
+	stopCh          chan struct{}
 	// kickCh wakes the loop early after a settings change (buffered 1).
 	kickCh    chan struct{}
 	startOnce sync.Once
@@ -70,13 +69,23 @@ type ChannelMonitorV2Aggregator struct {
 
 func NewChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.DB, settings channelMonitorRuntimeReader) *ChannelMonitorV2Aggregator {
 	return &ChannelMonitorV2Aggregator{
-		repo:          repo,
-		db:            db,
-		settings:      settings,
-		instanceID:    uuid.NewString(),
-		stopCh:        make(chan struct{}),
-		kickCh:        make(chan struct{}, 1),
-		backfillChunk: channelMonitorV2BackfillChunkInit,
+		repo:            repo,
+		db:              db,
+		settings:        settings,
+		instanceID:      uuid.NewString(),
+		stopCh:          make(chan struct{}),
+		kickCh:          make(chan struct{}, 1),
+		backfillChunk:   channelMonitorV2BackfillChunkInit,
+		retentionPeriod: "30d",
+	}
+}
+
+func (s *ChannelMonitorV2Aggregator) SetRetentionPeriod(cfg *config.Config) {
+	if s == nil || cfg == nil {
+		return
+	}
+	if period := config.ChannelMonitorV2RetentionDuration(cfg.DashboardAgg.ChannelMonitorV2RetentionPeriod); period != "" {
+		s.retentionPeriod = period
 	}
 }
 
@@ -231,6 +240,7 @@ func (s *ChannelMonitorV2Aggregator) runOnce() {
 	}
 
 	now := time.Now().UTC().Truncate(time.Minute)
+	retention := channelMonitorV2RetentionDuration(s.retentionPeriod)
 	if err := s.ensureCursor(ctx, now); err != nil {
 		logger.LegacyPrintf("service.channel_monitor_v2", "[ChannelMonitorV2] load watermark failed: %v", err)
 		return
@@ -243,7 +253,7 @@ func (s *ChannelMonitorV2Aggregator) runOnce() {
 
 	// Phase 1 (first upgrade / empty): seed the default 120m UI window quickly.
 	if !hasData || cursor.IsZero() {
-		start := now.Add(-channelMonitorV2BootstrapFirst)
+		start := channelMonitorV2BackfillStart(now.Add(-channelMonitorV2BootstrapFirst))
 		started := time.Now()
 		if err := s.repo.RecomputeRange(ctx, start, now); err != nil {
 			logger.LegacyPrintf("service.channel_monitor_v2", "[ChannelMonitorV2] bootstrap recent aggregation failed: %v", err)
@@ -254,19 +264,20 @@ func (s *ChannelMonitorV2Aggregator) runOnce() {
 		return
 	}
 
-	// Always refresh the trailing overlap so late usage/error writes land in 1m facts.
+	// Always refresh the trailing overlap so late usage/error writes land in 5m buckets.
 	if err := s.repo.RecomputeRange(ctx, now.Add(-channelMonitorV2RecentOverlap), now); err != nil {
 		logger.LegacyPrintf("service.channel_monitor_v2", "[ChannelMonitorV2] overlap aggregation failed: %v", err)
 		return
 	}
 
-	// Phase 2: walk history backward at most one chunk per tick until retention max (90d).
-	// Product UI (30d) fills first; remaining 30–90d continues silently.
-	retentionCutoff := now.Add(-channelMonitorV2RetentionMax)
+	// Phase 2: walk history backward at most one chunk per tick until the configured retention limit.
+	retentionCutoff := now.Add(-retention)
 	if !cursor.After(retentionCutoff) {
 		return
 	}
-	end := cursor
+	// Legacy cursors may end partway through an hour. Rebuild that entire
+	// hour once instead of overwriting it with a partial historical chunk.
+	end := channelMonitorV2BackfillEnd(cursor)
 	s.mu.Lock()
 	chunk := s.backfillChunk
 	s.mu.Unlock()
@@ -281,17 +292,11 @@ func (s *ChannelMonitorV2Aggregator) runOnce() {
 		chunk = channelMonitorV2MinBackfillChunk
 	}
 	start := end.Add(-chunk)
-	// Once bootstrap reaches historical data, keep chunks on day boundaries so
-	// daily rollups never depend on 1m rows from two independently pruned chunks.
-	if end.Before(now.Add(-7 * 24 * time.Hour)) {
-		aligned := end.Add(-chunk).Truncate(24 * time.Hour)
-		if aligned.Before(end) {
-			start = aligned
-		}
-	}
+
 	if start.Before(retentionCutoff) {
 		start = retentionCutoff
 	}
+	start = channelMonitorV2BackfillStart(start)
 	if !start.Before(end) {
 		return
 	}
@@ -302,6 +307,22 @@ func (s *ChannelMonitorV2Aggregator) runOnce() {
 		return
 	}
 	s.recordBackfillSuccess(start, time.Since(started), now)
+}
+
+func channelMonitorV2BackfillEnd(cursor time.Time) time.Time {
+	end := cursor.UTC().Truncate(time.Hour)
+	if end.Before(cursor) {
+		return end.Add(time.Hour)
+	}
+	return end
+}
+
+func channelMonitorV2BackfillStart(start time.Time) time.Time {
+	return start.UTC().Truncate(time.Hour)
+}
+
+func channelMonitorV2RetentionDuration(period string) time.Duration {
+	return config.ChannelMonitorV2StoredRetention(period)
 }
 
 // channelMonitorV2MaxChunkForDepth returns the hard ceiling for a historical
