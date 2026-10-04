@@ -8,11 +8,38 @@ import (
 	"strconv"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestChannelMonitorV2PublicResponseMatchesSuccessEnvelope(t *testing.T) {
+	data := &service.ChannelMonitorV2Dimensions{Groups: []service.ChannelMonitorV2GroupDimension{{ID: 1, Name: "one"}}}
+	wantRecorder := httptest.NewRecorder()
+	wantContext, _ := gin.CreateTestContext(wantRecorder)
+	response.Success(wantContext, data)
+
+	gotRecorder := httptest.NewRecorder()
+	gotContext, _ := gin.CreateTestContext(gotRecorder)
+	writeChannelMonitorV2PublicResponse(gotContext, wantRecorder.Body.Bytes(), nil)
+	require.Equal(t, wantRecorder.Code, gotRecorder.Code)
+	require.Equal(t, wantRecorder.Header().Get("Content-Type"), gotRecorder.Header().Get("Content-Type"))
+	require.JSONEq(t, wantRecorder.Body.String(), gotRecorder.Body.String())
+}
+
+func TestChannelMonitorV2PublicResponseMatchesPanelRateLimit(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	err := infraerrors.TooManyRequests("RATE_LIMITED", "Too many requests, please slow down and try again later").WithMetadata(map[string]string{"retry_after": "60"})
+	writeChannelMonitorV2PublicResponse(c, nil, err)
+
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	require.Equal(t, "60", recorder.Header().Get("Retry-After"))
+	require.JSONEq(t, `{"code":"RATE_LIMITED","message":"Too many requests, please slow down and try again later"}`, recorder.Body.String())
+}
 
 type channelMonitorV2GroupAuthorizerStub struct {
 	groups []service.Group

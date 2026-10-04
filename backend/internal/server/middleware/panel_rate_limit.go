@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/middleware"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -48,6 +49,47 @@ func NewPanelRateLimiter(redisClient *redis.Client, settingService *service.Sett
 // Global 认证面板接口的全局按用户限流（宽松档，覆盖所有登录后端点）。
 func (p *PanelRateLimiter) Global() gin.HandlerFunc {
 	return p.userScoped("global", func(s service.PanelRateLimitSettings) int { return s.UserRPM })
+}
+
+// V2CacheMiss defers the heavy limit until the public V2 cache starts a load.
+func (p *PanelRateLimiter) V2CacheMiss() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		subject, ok := GetAuthSubjectFromContext(c)
+		if !ok || subject.UserID <= 0 {
+			c.Next()
+			return
+		}
+		userID := subject.UserID
+		role, _ := GetUserRoleFromContext(c)
+		ctx := service.WithChannelMonitorV2LoadLimit(c.Request.Context(), func(ctx context.Context) error {
+			if p == nil || p.limiter == nil || p.settingService == nil {
+				return nil
+			}
+			settings := p.settingService.GetPanelRateLimitSettingsCached(ctx)
+			if !settings.Enabled || (settings.ExemptAdmin && role == service.RoleAdmin) {
+				return nil
+			}
+			if settings.HeavyRPM <= 0 {
+				return nil
+			}
+			result, err := p.limiter.Allow(ctx, "panel:heavy:user:"+strconv.FormatInt(userID, 10), settings.HeavyRPM, panelRateLimitWindow)
+			if err != nil {
+				slog.Warn("panel rate limit check failed, allowing request", "scope", "heavy", "error", err)
+				return nil
+			}
+			if !result.Allowed {
+				retryAfter := result.RetryAfter
+				if retryAfter <= 0 {
+					retryAfter = panelRateLimitWindow
+				}
+				seconds := int64((retryAfter + time.Second - 1) / time.Second)
+				return infraerrors.TooManyRequests("RATE_LIMITED", "Too many requests, please slow down and try again later").WithMetadata(map[string]string{"retry_after": strconv.FormatInt(seconds, 10)})
+			}
+			return nil
+		})
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
 }
 
 // Heavy 重查询接口的按用户限流（严格档，覆盖 usage/dashboard 等聚合统计端点）。

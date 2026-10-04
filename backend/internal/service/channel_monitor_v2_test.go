@@ -10,13 +10,15 @@ import (
 )
 
 type channelMonitorV2RepoStub struct {
-	config serviceChannelMonitorV2ConfigAlias
-	users  *ChannelMonitorV2List[ChannelMonitorV2UserRow]
-	matrix *ChannelMonitorV2Matrix
-	errors *ChannelMonitorV2List[ChannelMonitorV2ErrorRow]
-	snap   *ChannelMonitorV2Snapshot
-	group  ChannelMonitorV2GroupBy
-	admin  bool
+	config         serviceChannelMonitorV2ConfigAlias
+	dimensions     *ChannelMonitorV2Dimensions
+	dimensionCalls int
+	users          *ChannelMonitorV2List[ChannelMonitorV2UserRow]
+	matrix         *ChannelMonitorV2Matrix
+	errors         *ChannelMonitorV2List[ChannelMonitorV2ErrorRow]
+	snap           *ChannelMonitorV2Snapshot
+	group          ChannelMonitorV2GroupBy
+	admin          bool
 }
 
 // Alias keeps composite literals readable without introducing another package.
@@ -30,7 +32,15 @@ func (s *channelMonitorV2RepoStub) UpdateConfig(context.Context, ChannelMonitorV
 	return nil, nil
 }
 func (s *channelMonitorV2RepoStub) GetDimensions(context.Context, ChannelMonitorV2Filter, ChannelMonitorV2Config) (*ChannelMonitorV2Dimensions, error) {
-	return nil, nil
+	s.dimensionCalls++
+	if s.dimensions == nil {
+		return nil, nil
+	}
+	copy := *s.dimensions
+	copy.Platforms = append([]ChannelMonitorV2Dimension(nil), s.dimensions.Platforms...)
+	copy.Groups = append([]ChannelMonitorV2GroupDimension(nil), s.dimensions.Groups...)
+	copy.Models = append([]ChannelMonitorV2Dimension(nil), s.dimensions.Models...)
+	return &copy, nil
 }
 func (s *channelMonitorV2RepoStub) GetSnapshot(_ context.Context, _ ChannelMonitorV2Filter, _ ChannelMonitorV2Config, admin bool) (*ChannelMonitorV2Snapshot, error) {
 	s.admin = admin

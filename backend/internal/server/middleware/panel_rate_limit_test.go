@@ -200,6 +200,35 @@ func TestPanelRateLimiterHeavyUsesHeavyRPM(t *testing.T) {
 	require.Contains(t, allower.counts, "panel:heavy:user:7")
 }
 
+func TestPanelRateLimiterGlobalCountsCachedV2Routes(t *testing.T) {
+	allower := &fakePanelAllower{}
+	p := &PanelRateLimiter{
+		limiter:        allower,
+		settingService: newPanelRateLimitTestService(t, `{"enabled":true,"user_rpm":1,"heavy_rpm":1,"exempt_admin":true,"public_ip_rpm":0}`),
+	}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	v1 := router.Group("/api/v1")
+	v1.Use(func(c *gin.Context) {
+		c.Set(string(ContextKeyUser), AuthSubject{UserID: 7})
+		c.Set(string(ContextKeyUserRole), service.RoleUser)
+		c.Next()
+	})
+	v1.Use(p.Global())
+	v1.GET("/channel-monitor-v2/matrix", func(c *gin.Context) { c.Status(http.StatusOK) })
+	v1.GET("/channel-monitor-v2/users", func(c *gin.Context) { c.Status(http.StatusOK) })
+	v1.GET("/other", func(c *gin.Context) { c.Status(http.StatusOK) })
+	get := func(path string) int {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec.Code
+	}
+	require.Equal(t, http.StatusOK, get("/api/v1/channel-monitor-v2/matrix"))
+	require.Equal(t, http.StatusTooManyRequests, get("/api/v1/channel-monitor-v2/matrix"))
+	require.Equal(t, http.StatusTooManyRequests, get("/api/v1/channel-monitor-v2/users"))
+	require.Equal(t, http.StatusTooManyRequests, get("/api/v1/other"))
+}
+
 func TestPanelRateLimiterAdminExemption(t *testing.T) {
 	// 豁免开启：管理员不计数
 	p := &PanelRateLimiter{

@@ -144,15 +144,16 @@ func RegisterUserRoutes(
 
 		// V2 passive views require feature on + mode=v2.
 		monitorV2 := authenticated.Group("/channel-monitor-v2")
-		monitorV2.Use(panelRateLimiter.Heavy())
 		monitorV2.Use(channelMonitorModeV2Guard(settingService))
 		{
-			monitorV2.GET("/dimensions", h.ChannelMonitorV2.Dimensions)
-			monitorV2.GET("/snapshot", h.ChannelMonitorV2.Snapshot)
-			monitorV2.GET("/models", h.ChannelMonitorV2.Models)
-			monitorV2.GET("/matrix", h.ChannelMonitorV2.Matrix)
-			monitorV2.GET("/errors", h.ChannelMonitorV2.Errors)
-			monitorV2.GET("/users", h.ChannelMonitorV2.Users)
+			// Global applies to every request; heavy applies only when a public view loads data.
+			cacheMissLimit := panelRateLimiter.V2CacheMiss()
+			monitorV2.GET("/dimensions", cacheMissLimit, h.ChannelMonitorV2.Dimensions)
+			monitorV2.GET("/snapshot", cacheMissLimit, h.ChannelMonitorV2.Snapshot)
+			monitorV2.GET("/models", cacheMissLimit, h.ChannelMonitorV2.Models)
+			monitorV2.GET("/matrix", cacheMissLimit, h.ChannelMonitorV2.Matrix)
+			monitorV2.GET("/errors", cacheMissLimit, h.ChannelMonitorV2.Errors)
+			monitorV2.GET("/users", panelRateLimiter.Heavy(), h.ChannelMonitorV2.Users)
 		}
 	}
 }

@@ -395,10 +395,11 @@ type ChannelMonitorV2Service struct {
 	settings        channelMonitorRuntimeReader
 	retentionPeriod string
 	now             func() time.Time
+	publicCache     *channelMonitorV2PublicCache
 }
 
 func NewChannelMonitorV2Service(repo ChannelMonitorV2Repository) *ChannelMonitorV2Service {
-	return &ChannelMonitorV2Service{repo: repo, retentionPeriod: "30d", now: func() time.Time { return time.Now().UTC() }}
+	return &ChannelMonitorV2Service{repo: repo, retentionPeriod: "30d", now: func() time.Time { return time.Now().UTC() }, publicCache: newChannelMonitorV2PublicCache()}
 }
 
 func (s *ChannelMonitorV2Service) SetRetentionPeriod(cfg *config.Config) {
@@ -501,54 +502,109 @@ func (s *ChannelMonitorV2Service) ParseFilter(rangeValue string, platforms, mode
 }
 
 func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter ChannelMonitorV2Filter) (*ChannelMonitorV2Dimensions, error) {
+	return s.DimensionsForViewer(ctx, filter, true)
+}
+
+func (s *ChannelMonitorV2Service) DimensionsForViewer(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2Dimensions, error) {
+	if !admin {
+		data, err := s.PublicDimensionsResponse(ctx, filter)
+		return channelMonitorV2DecodeResponse[ChannelMonitorV2Dimensions](data, err)
+	}
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	dims, err := s.repo.GetDimensions(ctx, filter, *cfg)
+	return s.repo.GetDimensions(ctx, filter, *cfg)
+}
+
+func (s *ChannelMonitorV2Service) PublicDimensionsResponse(ctx context.Context, filter ChannelMonitorV2Filter) ([]byte, error) {
+	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// Dimension request_count is operational volume; strip for non-admin callers
-	// at the API edge. Dimensions is shared by user/admin routes — redaction is
-	// applied in the handler for user routes only, so keep raw here.
-	return dims, nil
+	return channelMonitorV2CachedResponse(ctx, s.publicCache, channelMonitorV2PublicCacheKey("dimensions", filter, *cfg, "", false), func(loadCtx context.Context) (*ChannelMonitorV2Dimensions, error) {
+		dims, err := s.repo.GetDimensions(loadCtx, filter, *cfg)
+		if err == nil {
+			RedactChannelMonitorV2Dimensions(dims)
+		}
+		return dims, err
+	})
 }
 
 func (s *ChannelMonitorV2Service) Snapshot(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2Snapshot, error) {
+	if !admin {
+		data, err := s.PublicSnapshotResponse(ctx, filter)
+		return channelMonitorV2DecodeResponse[ChannelMonitorV2Snapshot](data, err)
+	}
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	snap, err := s.repo.GetSnapshot(ctx, filter, *cfg, admin)
+	return s.repo.GetSnapshot(ctx, filter, *cfg, true)
+}
+
+func (s *ChannelMonitorV2Service) PublicSnapshotResponse(ctx context.Context, filter ChannelMonitorV2Filter) ([]byte, error) {
+	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !admin && snap != nil {
-		redactChannelMonitorV2Snapshot(snap, s.hideThroughputForViewer(ctx, admin))
+	hideTP := s.hideThroughputForViewer(ctx, false)
+	load := func(loadCtx context.Context) (*ChannelMonitorV2Snapshot, error) {
+		snap, loadErr := s.repo.GetSnapshot(loadCtx, filter, *cfg, false)
+		if loadErr == nil && snap != nil {
+			redactChannelMonitorV2Snapshot(snap, hideTP)
+		}
+		return snap, loadErr
 	}
-	return snap, nil
+	return channelMonitorV2CachedResponse(ctx, s.publicCache, channelMonitorV2PublicCacheKey("snapshot", filter, *cfg, "", hideTP), load)
 }
 
 func (s *ChannelMonitorV2Service) Models(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ModelRow], error) {
+	if !admin {
+		data, err := s.PublicModelsResponse(ctx, filter)
+		return channelMonitorV2DecodeResponse[ChannelMonitorV2List[ChannelMonitorV2ModelRow]](data, err)
+	}
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	list, err := s.repo.GetModels(ctx, filter, *cfg, admin)
+	return s.repo.GetModels(ctx, filter, *cfg, true)
+}
+
+func (s *ChannelMonitorV2Service) PublicModelsResponse(ctx context.Context, filter ChannelMonitorV2Filter) ([]byte, error) {
+	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !admin && list != nil {
-		hideTP := s.hideThroughputForViewer(ctx, admin)
-		for i := range list.Items {
-			redactChannelMonitorV2Metric(&list.Items[i].Metrics, hideTP)
+	hideTP := s.hideThroughputForViewer(ctx, false)
+	load := func(loadCtx context.Context) (*ChannelMonitorV2List[ChannelMonitorV2ModelRow], error) {
+		list, loadErr := s.repo.GetModels(loadCtx, filter, *cfg, false)
+		if loadErr == nil && list != nil {
+			for i := range list.Items {
+				redactChannelMonitorV2Metric(&list.Items[i].Metrics, hideTP)
+			}
 		}
+		return list, loadErr
 	}
-	return list, nil
+	return channelMonitorV2CachedResponse(ctx, s.publicCache, channelMonitorV2PublicCacheKey("models", filter, *cfg, "", hideTP), load)
 }
 
 func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMonitorV2Filter, groupBy ChannelMonitorV2GroupBy, admin bool) (*ChannelMonitorV2Matrix, error) {
+	if !groupBy.Valid() {
+		return nil, fmt.Errorf("%w: %s", ErrChannelMonitorV2InvalidGroupBy, groupBy)
+	}
+	if !admin {
+		data, err := s.PublicMatrixResponse(ctx, filter, groupBy)
+		return channelMonitorV2DecodeResponse[ChannelMonitorV2Matrix](data, err)
+	}
+	cfg, err := s.getEnabledConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.GetMatrix(ctx, filter, *cfg, groupBy, true)
+}
+
+func (s *ChannelMonitorV2Service) PublicMatrixResponse(ctx context.Context, filter ChannelMonitorV2Filter, groupBy ChannelMonitorV2GroupBy) ([]byte, error) {
 	if !groupBy.Valid() {
 		return nil, fmt.Errorf("%w: %s", ErrChannelMonitorV2InvalidGroupBy, groupBy)
 	}
@@ -556,20 +612,20 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	if err != nil {
 		return nil, err
 	}
-	matrix, err := s.repo.GetMatrix(ctx, filter, *cfg, groupBy, admin)
-	if err != nil {
-		return nil, err
-	}
-	if !admin && matrix != nil {
-		hideTP := s.hideThroughputForViewer(ctx, admin)
-		for i := range matrix.Items {
-			redactChannelMonitorV2Metric(&matrix.Items[i].Metrics, hideTP)
-			for j := range matrix.Items[i].Buckets {
-				redactChannelMonitorV2Metric(&matrix.Items[i].Buckets[j].Metrics, hideTP)
+	hideTP := s.hideThroughputForViewer(ctx, false)
+	load := func(loadCtx context.Context) (*ChannelMonitorV2Matrix, error) {
+		matrix, loadErr := s.repo.GetMatrix(loadCtx, filter, *cfg, groupBy, false)
+		if loadErr == nil && matrix != nil {
+			for i := range matrix.Items {
+				redactChannelMonitorV2Metric(&matrix.Items[i].Metrics, hideTP)
+				for j := range matrix.Items[i].Buckets {
+					redactChannelMonitorV2Metric(&matrix.Items[i].Buckets[j].Metrics, hideTP)
+				}
 			}
 		}
+		return matrix, loadErr
 	}
-	return matrix, nil
+	return channelMonitorV2CachedResponse(ctx, s.publicCache, channelMonitorV2PublicCacheKey("matrix", filter, *cfg, groupBy, hideTP), load)
 }
 
 func ParseChannelMonitorV2GroupBy(value string) (ChannelMonitorV2GroupBy, error) {
@@ -601,21 +657,33 @@ func (s *ChannelMonitorV2Service) Errors(ctx context.Context, filter ChannelMoni
 // Non-admin callers receive category rates + ignored flags only: absolute Count
 // is zeroed and Details (upstream messages / status codes / volume) are omitted.
 func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
+	if !admin {
+		data, err := s.PublicErrorsResponse(ctx, filter)
+		return channelMonitorV2DecodeResponse[ChannelMonitorV2List[ChannelMonitorV2ErrorRow]](data, err)
+	}
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	list, err := s.repo.GetErrors(ctx, filter, *cfg, admin)
+	return s.repo.GetErrors(ctx, filter, *cfg, true)
+}
+
+func (s *ChannelMonitorV2Service) PublicErrorsResponse(ctx context.Context, filter ChannelMonitorV2Filter) ([]byte, error) {
+	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !admin && list != nil {
-		for i := range list.Items {
-			list.Items[i].Count = 0
-			list.Items[i].Details = nil
+	load := func(loadCtx context.Context) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
+		list, loadErr := s.repo.GetErrors(loadCtx, filter, *cfg, false)
+		if loadErr == nil && list != nil {
+			for i := range list.Items {
+				list.Items[i].Count = 0
+				list.Items[i].Details = nil
+			}
 		}
+		return list, loadErr
 	}
-	return list, nil
+	return channelMonitorV2CachedResponse(ctx, s.publicCache, channelMonitorV2PublicCacheKey("errors", filter, *cfg, "", false), load)
 }
 
 // RedactChannelMonitorV2Dimensions clears absolute request counts on filter chips.

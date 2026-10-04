@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -78,14 +79,15 @@ func (h *ChannelMonitorV2Handler) Dimensions(c *gin.Context) {
 	if !h.scopeFilter(c, &filter, admin) {
 		return
 	}
-	result, err := h.service.Dimensions(c.Request.Context(), filter)
+	if !admin {
+		data, err := h.service.PublicDimensionsResponse(c.Request.Context(), filter)
+		writeChannelMonitorV2PublicResponse(c, data, err)
+		return
+	}
+	result, err := h.service.DimensionsForViewer(c.Request.Context(), filter, admin)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
-	}
-	// Admin and user share this handler; only non-admin responses strip volume.
-	if !admin {
-		service.RedactChannelMonitorV2Dimensions(result)
 	}
 	response.Success(c, result)
 }
@@ -107,6 +109,11 @@ func (h *ChannelMonitorV2Handler) snapshot(c *gin.Context, admin bool) {
 	if !h.scopeFilter(c, &filter, admin) {
 		return
 	}
+	if !admin {
+		data, err := h.service.PublicSnapshotResponse(c.Request.Context(), filter)
+		writeChannelMonitorV2PublicResponse(c, data, err)
+		return
+	}
 	result, err := h.service.Snapshot(c.Request.Context(), filter, admin)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -121,6 +128,11 @@ func (h *ChannelMonitorV2Handler) models(c *gin.Context, admin bool) {
 		return
 	}
 	if !h.scopeFilter(c, &filter, admin) {
+		return
+	}
+	if !admin {
+		data, err := h.service.PublicModelsResponse(c.Request.Context(), filter)
+		writeChannelMonitorV2PublicResponse(c, data, err)
 		return
 	}
 	result, err := h.service.Models(c.Request.Context(), filter, admin)
@@ -144,6 +156,11 @@ func (h *ChannelMonitorV2Handler) matrix(c *gin.Context, admin bool) {
 	if !h.scopeFilter(c, &filter, admin) {
 		return
 	}
+	if !admin {
+		data, err := h.service.PublicMatrixResponse(c.Request.Context(), filter, groupBy)
+		writeChannelMonitorV2PublicResponse(c, data, err)
+		return
+	}
 	result, err := h.service.Matrix(c.Request.Context(), filter, groupBy, admin)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -161,12 +178,32 @@ func (h *ChannelMonitorV2Handler) Errors(c *gin.Context) {
 	if !h.scopeFilter(c, &filter, admin) {
 		return
 	}
+	if !admin {
+		data, err := h.service.PublicErrorsResponse(c.Request.Context(), filter)
+		writeChannelMonitorV2PublicResponse(c, data, err)
+		return
+	}
 	result, err := h.service.ErrorsForViewer(c.Request.Context(), filter, admin)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 	response.Success(c, result)
+}
+
+func writeChannelMonitorV2PublicResponse(c *gin.Context, data []byte, err error) {
+	if err != nil {
+		if status, body := infraerrors.ToHTTP(err); status == http.StatusTooManyRequests {
+			if retryAfter := body.Metadata["retry_after"]; retryAfter != "" {
+				c.Header("Retry-After", retryAfter)
+			}
+			middleware.AbortWithError(c, status, body.Reason, body.Message)
+			return
+		}
+		response.ErrorFrom(c, err)
+		return
+	}
+	c.Data(http.StatusOK, "application/json; charset=utf-8", data)
 }
 
 func (h *ChannelMonitorV2Handler) users(c *gin.Context, admin bool) {
