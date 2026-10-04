@@ -967,7 +967,7 @@ func sanitizeChannelMonitorV2ErrorDetail(message string) string {
 	return message
 }
 
-func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, admin bool) (*service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow], error) {
+func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, viewerID int64, admin bool) (*service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow], error) {
 	coverage, err := r.loadCoverage(ctx, filter)
 	if err != nil {
 		return nil, err
@@ -975,10 +975,71 @@ func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter servic
 	effectiveFilter := channelMonitorV2CommonCoverageFilter(filter, *coverage)
 	filter = effectiveFilter
 	where, args, _ := channelMonitorV2WhereWithRollup(filter, cfg, "m")
+	// Keep selection and details on one snapshot while rollups are refreshed.
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Rank from counts only. Keep model filtering shared with other V2 views,
+	// including configured models collapsed into "Other models".
+	countRows, err := tx.QueryContext(ctx, `SELECT m.user_id,m.platform,m.model,
+	SUM(m.success_requests),SUM(m.error_requests) FROM `+channelMonitorV2UserMetricsTable(filter)+` m `+where+` GROUP BY m.user_id,m.platform,m.model`, args...)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[int64]int64{}
+	var windowErrors int64
+	for countRows.Next() {
+		var uid, success, failures int64
+		var platform, model string
+		if err := countRows.Scan(&uid, &platform, &model, &success, &failures); err != nil {
+			_ = countRows.Close()
+			return nil, err
+		}
+		if channelMonitorV2ModelSelected(filter, cfg, platform, model) {
+			counts[uid] += success + failures
+			windowErrors += failures
+		}
+	}
+	if err := countRows.Err(); err != nil {
+		_ = countRows.Close()
+		return nil, err
+	}
+	if err := countRows.Close(); err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(counts))
+	for id := range counts {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if counts[ids[i]] != counts[ids[j]] {
+			return counts[ids[i]] > counts[ids[j]]
+		}
+		return ids[i] < ids[j]
+	})
+	ranks := make(map[int64]int, 21)
+	selected := make([]int64, 0, 21)
+	for i, id := range ids {
+		if i < 20 || id == viewerID {
+			selected = append(selected, id)
+			ranks[id] = i + 1
+		}
+	}
+	if len(selected) == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return &service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow]{Coverage: *coverage, Items: []service.ChannelMonitorV2UserRow{}}, nil
+	}
+	// Fetch expensive metrics and identities only for the top 20 and viewer.
+	args = append(args, pq.Array(selected))
+	where += fmt.Sprintf(" AND m.user_id = ANY($%d)", len(args))
 	query := `SELECT m.user_id,COALESCE(u.email,''),COALESCE(u.username,''),m.platform,m.model,
 	SUM(m.success_requests),SUM(m.error_requests),SUM(m.input_tokens),SUM(m.output_tokens),SUM(m.cache_creation_tokens),SUM(m.cache_read_tokens),SUM(m.ttft_sum_ms),SUM(m.ttft_count),SUM(m.duration_sum_ms),SUM(m.duration_count)
 	FROM ` + channelMonitorV2UserMetricsTable(filter) + ` m LEFT JOIN users u ON u.id=m.user_id ` + where + ` GROUP BY m.user_id,u.email,u.username,m.platform,m.model`
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1002,16 +1063,21 @@ func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter servic
 		accs[uid].addFact(f)
 		meta[uid] = userMeta{email, username}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	// Error category facts are not per-user. Approximate ignored-error impact by
 	// applying the window-level ignored/error ratio to each user's error count so
 	// user-rank rates stay consistent with overview scoring.
 	_, ignoredTotal, err := r.loadIgnoredErrorCounts(ctx, effectiveFilter, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("load ignored error counts for users: %w", err)
-	}
-	var windowErrors int64
-	for _, acc := range accs {
-		windowErrors += acc.errors
 	}
 	ignoreRatio := 0.0
 	if windowErrors > 0 && ignoredTotal > 0 {
@@ -1037,13 +1103,10 @@ func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter servic
 		}
 		// Recompute health after rate adjustment.
 		// (metric() does not attach health; callers that need it recompute.)
-		items = append(items, service.ChannelMonitorV2UserRow{UserID: &id, Email: m.email, Username: m.username, DisplayLabel: label, CanDrilldown: admin, Metrics: metrics})
+		items = append(items, service.ChannelMonitorV2UserRow{Rank: ranks[id], UserID: &id, Email: m.email, Username: m.username, DisplayLabel: label, CanDrilldown: admin, Metrics: metrics})
 	}
 	sort.Slice(items, func(i, j int) bool {
-		if items[i].Metrics.RequestCount != items[j].Metrics.RequestCount {
-			return items[i].Metrics.RequestCount > items[j].Metrics.RequestCount
-		}
-		return *items[i].UserID < *items[j].UserID
+		return items[i].Rank < items[j].Rank
 	})
 	return &service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow]{Coverage: *coverage, Items: items}, rows.Err()
 }
@@ -1700,7 +1763,7 @@ func (r *channelMonitorV2Repository) FindUserIDByUsernameOrEmail(ctx context.Con
 		return 0, service.ErrUserNotFound
 	}
 	if count > 1 {
-		return 0, fmt.Errorf("%w: username or email matches multiple users", service.ErrChannelMonitorV2InvalidConfig)
+		return 0, service.ErrChannelMonitorV2AmbiguousUser
 	}
 	return id, nil
 }

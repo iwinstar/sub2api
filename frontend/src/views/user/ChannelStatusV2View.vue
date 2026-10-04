@@ -587,7 +587,10 @@ const rankingRows = computed(() => {
   const rows = userRows.value.filter(row => row.rank > 0 && row.rank <= 20)
     .map(row => ({ row, personal: false }))
   const personal = searchedRank.value || userRows.value.find(row => row.is_self)
-  if (personal) rows.push({ row: personal, personal: true })
+  // Keep the admin lookup row; ordinary users already in the top 20 appear once.
+  if (personal && (isAdmin.value || !rows.some(({ row }) => row.is_self))) {
+    rows.push({ row: personal, personal: true })
+  }
   return rows
 })
 function clearRankSearch() {

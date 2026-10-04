@@ -95,7 +95,7 @@ type ranking20Repo struct {
 func (r *ranking20Repo) GetConfig(context.Context) (*service.ChannelMonitorV2Config, error) {
 	return &service.ChannelMonitorV2Config{Enabled: true}, nil
 }
-func (r *ranking20Repo) GetUsers(context.Context, service.ChannelMonitorV2Filter, service.ChannelMonitorV2Config, bool) (*service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow], error) {
+func (r *ranking20Repo) GetUsers(context.Context, service.ChannelMonitorV2Filter, service.ChannelMonitorV2Config, int64, bool) (*service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow], error) {
 	out := &service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow]{}
 	for i := int64(1); i <= 25; i++ {
 		id := i

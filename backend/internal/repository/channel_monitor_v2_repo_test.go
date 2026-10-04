@@ -578,17 +578,63 @@ func TestChannelMonitorV2GetUsersUsesAverageWithoutUserHistograms(t *testing.T) 
 	mock.ExpectQuery("SELECT usage_coverage_start").WillReturnRows(sqlmock.NewRows([]string{
 		"usage_coverage_start", "error_coverage_start", "data_through", "last_successful_at", "backfill_cursor",
 	}).AddRow(start, start, end, end, start))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT m\\.user_id,m\\.platform,m\\.model").WillReturnRows(sqlmock.NewRows([]string{
+		"user_id", "platform", "model", "success_requests", "error_requests",
+	}).AddRow(7, "openai", "gpt-5", 2, 0))
 	mock.ExpectQuery("SELECT m\\.user_id").WillReturnRows(sqlmock.NewRows([]string{
 		"user_id", "email", "username", "platform", "model", "success_requests", "error_requests",
 		"input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "ttft_sum_ms",
 		"ttft_count", "duration_sum_ms", "duration_count",
 	}).AddRow(7, "user@example.com", "user", "openai", "gpt-5", 2, 0, 10, 20, 0, 0, 200, 2, 1000, 2))
-	result, err := r.GetUsers(context.Background(), service.ChannelMonitorV2Filter{Start: start, End: end, Bucket: time.Hour}, service.ChannelMonitorV2Config{}, true)
+	mock.ExpectCommit()
+	result, err := r.GetUsers(context.Background(), service.ChannelMonitorV2Filter{Start: start, End: end, Bucket: time.Hour}, service.ChannelMonitorV2Config{}, 7, true)
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	require.Equal(t, float64(100), *result.Items[0].Metrics.TTFT.AvgMs)
 	require.Nil(t, result.Items[0].Metrics.TTFT.P50Ms)
 	require.Nil(t, result.Items[0].Metrics.TTFT.P90Ms)
 	require.Nil(t, result.Items[0].Metrics.TTFT.P95Ms)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChannelMonitorV2GetUsersOnlyLoadsTop20AndViewerDetails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	r := &channelMonitorV2Repository{db: db}
+	start := time.Now().UTC().Truncate(time.Hour)
+	end := start.Add(time.Hour)
+	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true, Models: []string{"selected"}}}}
+	filter := service.ChannelMonitorV2Filter{Start: start, End: end, Bucket: time.Hour, Models: []string{"selected"}}
+	mock.ExpectQuery("SELECT usage_coverage_start").WillReturnRows(sqlmock.NewRows([]string{"usage_coverage_start", "error_coverage_start", "data_through", "last_successful_at", "backfill_cursor"}).AddRow(start, start, end, end, start))
+	mock.ExpectBegin()
+	counts := sqlmock.NewRows([]string{"user_id", "platform", "model", "success_requests", "error_requests"})
+	for id := 25; id >= 1; id-- {
+		// Equal totals exercise the ID tie-breaker, irrespective of row order.
+		counts.AddRow(id, "openai", "selected", 9, 1)
+	}
+	counts.AddRow(26, "openai", "excluded", 100000, 0)
+	mock.ExpectQuery("SELECT m\\.user_id,m\\.platform,m\\.model").WillReturnRows(counts).RowsWillBeClosed()
+	selected := make([]int64, 0, 21)
+	for id := int64(1); id <= 20; id++ {
+		selected = append(selected, id)
+	}
+	selected = append(selected, 25)
+	details := sqlmock.NewRows([]string{"user_id", "email", "username", "platform", "model", "success_requests", "error_requests", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "ttft_sum_ms", "ttft_count", "duration_sum_ms", "duration_count"})
+	for _, id := range selected {
+		details.AddRow(id, "user@example.com", "user", "openai", "selected", 9, 1, 10, 20, 0, 0, 900, 9, 1800, 9)
+	}
+	mock.ExpectQuery(`SELECT m\.user_id,COALESCE.*AND m\.user_id = ANY\(\$5\)`).WithArgs(start, end, pq.Array([]string{"openai"}), 3600, pq.Array(selected)).WillReturnRows(details)
+	mock.ExpectCommit()
+	result, err := r.GetUsers(context.Background(), filter, cfg, 25, true)
+	require.NoError(t, err)
+	require.Len(t, result.Items, 21)
+	for i := 0; i < 20; i++ {
+		require.Equal(t, i+1, result.Items[i].Rank)
+	}
+	require.Equal(t, int64(25), *result.Items[20].UserID)
+	require.Equal(t, 25, result.Items[20].Rank)
+	require.Equal(t, float64(100), *result.Items[20].Metrics.TTFT.AvgMs)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

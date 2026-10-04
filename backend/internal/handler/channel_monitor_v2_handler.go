@@ -192,7 +192,7 @@ func (h *ChannelMonitorV2Handler) users(c *gin.Context, admin bool) {
 		var err error
 		targetID, err = h.service.FindUserIDByUsernameOrEmail(c.Request.Context(), lookup)
 		if err != nil {
-			if errors.Is(err, service.ErrChannelMonitorV2InvalidConfig) {
+			if errors.Is(err, service.ErrChannelMonitorV2AmbiguousUser) {
 				response.BadRequest(c, "username or email matches multiple users")
 			} else {
 				response.ErrorFrom(c, err)

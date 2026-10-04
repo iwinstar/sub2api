@@ -20,6 +20,7 @@ var (
 	ErrChannelMonitorV2InvalidRange   = errors.New("invalid channel monitor v2 range")
 	ErrChannelMonitorV2InvalidGroupBy = errors.New("invalid channel monitor v2 group_by")
 	ErrChannelMonitorV2InvalidConfig  = errors.New("invalid channel monitor v2 config")
+	ErrChannelMonitorV2AmbiguousUser  = errors.New("username or email matches multiple users")
 	ErrChannelMonitorV2ConfigConflict = errors.New("channel monitor v2 config was modified")
 )
 
@@ -319,7 +320,7 @@ type ChannelMonitorV2Repository interface {
 	// GetErrors loads category rates. When includeAdmin is false, implementations
 	// must omit error Details (no ops_error_logs sample scan) for privacy.
 	GetErrors(ctx context.Context, filter ChannelMonitorV2Filter, config ChannelMonitorV2Config, includeAdmin bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error)
-	GetUsers(ctx context.Context, filter ChannelMonitorV2Filter, config ChannelMonitorV2Config, includeAdmin bool) (*ChannelMonitorV2List[ChannelMonitorV2UserRow], error)
+	GetUsers(ctx context.Context, filter ChannelMonitorV2Filter, config ChannelMonitorV2Config, viewerID int64, includeAdmin bool) (*ChannelMonitorV2List[ChannelMonitorV2UserRow], error)
 	// GetAggregationWatermark loads durable backfill / coverage cursors for the
 	// passive aggregator (and bootstrap progress). Missing row → zero value, nil error.
 	GetAggregationWatermark(ctx context.Context) (*ChannelMonitorV2AggregationWatermark, error)
@@ -698,7 +699,7 @@ func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonit
 	if s.hideUserRankingForViewer(ctx, admin) {
 		return &ChannelMonitorV2List[ChannelMonitorV2UserRow]{Items: []ChannelMonitorV2UserRow{}}, nil
 	}
-	result, err := s.repo.GetUsers(ctx, filter, *cfg, admin)
+	result, err := s.repo.GetUsers(ctx, filter, *cfg, viewerID, admin)
 	if err != nil {
 		return nil, err
 	}
@@ -707,7 +708,9 @@ func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonit
 	}
 	selfIndex := -1
 	for i := range result.Items {
-		result.Items[i].Rank = i + 1
+		if result.Items[i].Rank == 0 {
+			result.Items[i].Rank = i + 1
+		}
 		if result.Items[i].UserID != nil && *result.Items[i].UserID == viewerID {
 			selfIndex = i
 			result.Items[i].IsSelf = true
