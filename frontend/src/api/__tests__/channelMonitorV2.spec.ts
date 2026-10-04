@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '../client'
-import { getMatrix, repeatedArrayParamsSerializer } from '../channelMonitorV2'
+import { getMatrix, getUserRank, repeatedArrayParamsSerializer } from '../channelMonitorV2'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -35,4 +35,15 @@ describe('channel monitor V2 query serialization', () => {
       },
     }))
   })
+})
+
+it('looks up a user only through the admin endpoint with the current filters', async () => {
+  const controller = new AbortController()
+  const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { items: [{ user_id: 25, rank: 25 }] } })
+  const result = await getUserRank({ range: '7d', platforms: ['openai'], groupIds: [7], models: [] }, 'alice', controller.signal)
+  expect(result?.rank).toBe(25)
+  expect(get).toHaveBeenCalledWith('/admin/channel-monitor-v2/users', expect.objectContaining({
+    signal: controller.signal,
+    params: expect.objectContaining({ range: '7d', username: 'alice', group_id: [7] }),
+  }))
 })

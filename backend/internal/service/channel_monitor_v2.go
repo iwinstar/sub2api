@@ -309,6 +309,7 @@ type ChannelMonitorV2List[T any] struct {
 }
 
 type ChannelMonitorV2Repository interface {
+	FindUserIDByUsernameOrEmail(context.Context, string) (int64, error)
 	GetConfig(ctx context.Context) (*ChannelMonitorV2Config, error)
 	UpdateConfig(ctx context.Context, config ChannelMonitorV2Config, expectedVersion int) (*ChannelMonitorV2Config, error)
 	GetDimensions(ctx context.Context, filter ChannelMonitorV2Filter, config ChannelMonitorV2Config) (*ChannelMonitorV2Dimensions, error)
@@ -727,7 +728,7 @@ func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonit
 		result.Items = append(result.Items, selfRow)
 		selfIndex = len(result.Items) - 1
 	}
-	result.Items = channelMonitorV2TopUsersWithSelf(result.Items, selfIndex, 10)
+	result.Items = channelMonitorV2TopUsersWithSelf(result.Items, selfIndex, 20)
 	hideTP := s.hideThroughputForViewer(ctx, admin)
 	if admin {
 		// Keep identity for admin; still mark self for UI highlight.
@@ -1136,4 +1137,8 @@ func healthBand(value, warning, critical float64) string {
 		return "warning"
 	}
 	return "healthy"
+}
+
+func (s *ChannelMonitorV2Service) FindUserIDByUsernameOrEmail(ctx context.Context, username string) (int64, error) {
+	return s.repo.FindUserIDByUsernameOrEmail(ctx, strings.TrimSpace(username))
 }

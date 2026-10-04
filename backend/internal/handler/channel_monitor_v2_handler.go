@@ -182,10 +182,42 @@ func (h *ChannelMonitorV2Handler) users(c *gin.Context, admin bool) {
 	if !h.scopeFilter(c, &filter, admin) {
 		return
 	}
-	result, err := h.service.Users(c.Request.Context(), filter, subject.UserID, admin)
+	targetID := subject.UserID
+	lookup := strings.TrimSpace(c.Query("username"))
+	if lookup != "" {
+		if !admin {
+			response.Error(c, http.StatusForbidden, "user lookup requires administrator access")
+			return
+		}
+		var err error
+		targetID, err = h.service.FindUserIDByUsernameOrEmail(c.Request.Context(), lookup)
+		if err != nil {
+			if errors.Is(err, service.ErrChannelMonitorV2InvalidConfig) {
+				response.BadRequest(c, "username or email matches multiple users")
+			} else {
+				response.ErrorFrom(c, err)
+			}
+			return
+		}
+	}
+	result, err := h.service.Users(c.Request.Context(), filter, targetID, admin)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+	if lookup != "" {
+		selected := []service.ChannelMonitorV2UserRow{}
+		for _, row := range result.Items {
+			if row.UserID != nil && *row.UserID == targetID {
+				row.IsSelf = targetID == subject.UserID
+				if row.DisplayLabel == "Me" {
+					row.DisplayLabel = lookup
+				}
+				selected = append(selected, row)
+				break
+			}
+		}
+		result.Items = selected
 	}
 	response.Success(c, result)
 }

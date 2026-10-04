@@ -526,3 +526,7 @@ func TestChannelMonitorV2HealthTTFTAtTargetIsHealthy(t *testing.T) {
 	require.NotNil(t, h.TTFTScore)
 	require.InDelta(t, 100.0, *h.TTFTScore, 0.01)
 }
+
+func (s *channelMonitorV2RepoStub) FindUserIDByUsernameOrEmail(context.Context, string) (int64, error) {
+	return 0, ErrUserNotFound
+}

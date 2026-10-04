@@ -399,23 +399,25 @@
               </thead>
               <tbody>
                 <tr
-                  v-for="row in userRows"
-                  :key="row.user_id || row.display_label"
-                  :class="row.is_self
+                  v-for="{ row, personal } in rankingRows"
+                  :key="personal ? 'personal' : `rank:${row.user_id || row.display_label}`"
+                  :class="personal || row.is_self
                     ? 'bg-primary-50 ring-1 ring-inset ring-primary-200/80 dark:bg-primary-900/25 dark:ring-primary-700/50'
                     : ''"
                 >
                   <td><MonitorRankBadge :rank="row.rank" /></td>
                   <td>
-                    <strong
-                      class="font-semibold"
-                      :class="row.is_self ? 'text-primary-700 dark:text-primary-300' : 'text-gray-900 dark:text-white'"
-                    >
+                    <template v-if="personal && isAdmin">
+                      <form v-if="rankEditing" @submit.prevent="searchRank">
+                        <input ref="rankInput" v-model="rankQuery" type="text" class="input !w-44 !py-1" :aria-label="t('channelMonitorV2.rankSearch.placeholder')" :placeholder="t('channelMonitorV2.rankSearch.placeholder')" @keydown.esc="cancelRankEdit" />
+                        <span v-if="rankSearching" class="block text-xs text-gray-400">{{ t('common.loading') }}</span>
+                        <span v-if="rankSearchError" role="alert" class="block text-xs text-red-500">{{ rankSearchError }}</span>
+                      </form>
+                      <button v-else type="button" class="text-left font-semibold text-primary-700 dark:text-primary-300" :title="t('channelMonitorV2.rankSearch.placeholder')" @click="beginRankEdit">{{ searchedRank ? row.display_label : 'Me' }}</button>
+                    </template>
+                    <strong v-else class="font-semibold" :class="row.is_self ? 'text-primary-700 dark:text-primary-300' : 'text-gray-900 dark:text-white'">
                       {{ row.display_label }}
-                      <span
-                        v-if="row.is_self"
-                        class="badge badge-primary ml-2 !px-1.5 !py-0 text-[10px]"
-                      >{{ t('channelMonitorV2.currentUser') }}</span>
+                      <span v-if="row.is_self" class="badge badge-primary ml-2 !px-1.5 !py-0 text-[10px]">{{ t('channelMonitorV2.currentUser') }}</span>
                     </strong>
                   </td>
                   <td>
@@ -458,7 +460,7 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -563,6 +565,58 @@ const matrix = ref<MonitorMatrixResponse | null>(null)
 const modelRows = ref<MonitorModelRow[]>([])
 const errorRows = ref<MonitorErrorRow[]>([])
 const userRows = ref<MonitorUserRow[]>([])
+const rankQuery = ref('')
+const rankEditing = ref(false)
+const rankInput = ref<HTMLInputElement[] | null>(null)
+async function beginRankEdit() {
+  rankEditing.value = true
+  await nextTick()
+  rankInput.value?.[0]?.focus()
+}
+function cancelRankEdit() {
+  clearRankSearch()
+  rankQuery.value = ''
+  rankEditing.value = false
+}
+const searchedRank = ref<MonitorUserRow | null>(null)
+const rankSearching = ref(false)
+const rankSearchError = ref('')
+let rankSequence = 0
+let rankController: AbortController | null = null
+const rankingRows = computed(() => {
+  const rows = userRows.value.filter(row => row.rank > 0 && row.rank <= 20)
+    .map(row => ({ row, personal: false }))
+  const personal = searchedRank.value || userRows.value.find(row => row.is_self)
+  if (personal) rows.push({ row: personal, personal: true })
+  return rows
+})
+function clearRankSearch() {
+  rankSequence++
+  rankController?.abort()
+  searchedRank.value = null
+  rankSearching.value = false
+  rankSearchError.value = ''
+}
+watch(rankQuery, clearRankSearch, { flush: 'sync' })
+watch(filter, cancelRankEdit, { deep: true, flush: 'sync' })
+onBeforeUnmount(clearRankSearch)
+async function searchRank() {
+  clearRankSearch()
+  if (!isAdmin.value) return
+  const username = rankQuery.value.trim()
+  if (!username) { rankEditing.value = false; return }
+  const version = rankSequence
+  rankController = new AbortController()
+  rankSearching.value = true
+  try {
+    const row = await api.getUserRank(filter.value, username, rankController.signal)
+    if (version === rankSequence) { searchedRank.value = row; rankEditing.value = false }
+  } catch (error) {
+    if (version === rankSequence) rankSearchError.value = extractApiErrorMessage(error, t('channelMonitorV2.detailLoadFailed'))
+  } finally {
+    if (version === rankSequence) rankSearching.value = false
+  }
+}
 const loading = ref(false)
 const tabLoading = ref(false)
 const refreshing = ref(false)

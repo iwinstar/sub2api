@@ -271,6 +271,13 @@ export async function getUsers(filter: MonitorFilter, admin = false, signal?: Ab
   const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorUserRow[] }>(`${base(admin)}/users`, requestConfig(filter, signal))
   return data
 }
+export async function getUserRank(filter: MonitorFilter, username: string, signal?: AbortSignal) {
+  const config = requestConfig(filter, signal)
+  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorUserRow[] }>(`${base(true)}/users`, {
+    ...config, params: { ...config.params, username },
+  })
+  return data.items[0] || null
+}
 export async function getConfig() {
   const { data } = await apiClient.get<MonitorConfig>('/admin/channel-monitor-v2/config')
   return data

@@ -1,6 +1,7 @@
 /** Channel Monitor V2 (user + admin passive monitor UI) */
 export default {
   channelMonitorV2: {
+    rankSearch: { placeholder: '输入用户名或邮箱查询' },
     title: '渠道监控',
     updating: '正在更新数据',
     updatedTo: '更新至 {time}',

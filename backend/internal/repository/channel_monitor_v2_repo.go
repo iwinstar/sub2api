@@ -1039,7 +1039,12 @@ func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter servic
 		// (metric() does not attach health; callers that need it recompute.)
 		items = append(items, service.ChannelMonitorV2UserRow{UserID: &id, Email: m.email, Username: m.username, DisplayLabel: label, CanDrilldown: admin, Metrics: metrics})
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Metrics.RequestCount > items[j].Metrics.RequestCount })
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Metrics.RequestCount != items[j].Metrics.RequestCount {
+			return items[i].Metrics.RequestCount > items[j].Metrics.RequestCount
+		}
+		return *items[i].UserID < *items[j].UserID
+	})
 	return &service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow]{Coverage: *coverage, Items: items}, rows.Err()
 }
 
@@ -1671,4 +1676,31 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 		byDimBucket[key][bucketKey] += count
 	}
 	return byDimBucket, byDim, rows.Err()
+}
+
+// Match usernames and emails case-insensitively; reject ambiguous identities.
+func (r *channelMonitorV2Repository) FindUserIDByUsernameOrEmail(ctx context.Context, username string) (int64, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id FROM users WHERE deleted_at IS NULL AND (LOWER(username)=LOWER($1) OR LOWER(email)=LOWER($1)) ORDER BY id LIMIT 2`, username)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	var id int64
+	count := 0
+	for rows.Next() {
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return 0, service.ErrUserNotFound
+	}
+	if count > 1 {
+		return 0, fmt.Errorf("%w: username or email matches multiple users", service.ErrChannelMonitorV2InvalidConfig)
+	}
+	return id, nil
 }
