@@ -54,12 +54,15 @@ type DashboardAggregationRepository interface {
 
 // DashboardAggregationService 负责定时聚合与回填。
 type DashboardAggregationService struct {
-	repo                 DashboardAggregationRepository
-	timingWheel          *TimingWheelService
-	cfg                  config.DashboardAggregationConfig
-	settingRepo          SettingRepository
-	running              int32
-	lastRetentionCleanup atomic.Value // time.Time
+	repo                   DashboardAggregationRepository
+	timingWheel            *TimingWheelService
+	cfg                    config.DashboardAggregationConfig
+	settingRepo            SettingRepository
+	running                int32
+	lastRetentionCleanup   atomic.Value // time.Time
+	dedupDeletionRunning   int32
+	dedupDeletionCursors   [4]BillingDedupCursor
+	dedupDeletionSchedules [4]billingDedupSchedule
 
 	lockCache  LeaderLockCache
 	db         *sql.DB
@@ -95,6 +98,9 @@ func (s *DashboardAggregationService) SetLeaderLock(lockCache LeaderLockCache, d
 func (s *DashboardAggregationService) Start() {
 	if s == nil || s.repo == nil || s.timingWheel == nil {
 		return
+	}
+	if s.cfg.Retention.UsageBillingDedupOrdinaryAutoDelete || s.cfg.Retention.UsageBillingDedupVideoDeleteDays > 0 || s.cfg.Retention.UsageBillingDedupBatchImageDeleteDays > 0 {
+		s.scheduleBillingDedupDeletion(billingDedupInitialInterval)
 	}
 	if !s.cfg.Enabled {
 		logger.LegacyPrintf("service.dashboard_aggregation", "[DashboardAggregation] 聚合作业已禁用")

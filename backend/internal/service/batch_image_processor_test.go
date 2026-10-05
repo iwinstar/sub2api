@@ -645,6 +645,9 @@ func (r *fakeBatchImageRepository) SetBatchImageJobSettlementFailed(_ context.Co
 	if !ok {
 		return 0, ErrBatchImageJobNotFound
 	}
+	if job.Status != BatchImageJobStatusSettling {
+		return 0, ErrBatchImageSettlementInvalidStatus
+	}
 	job.LastErrorCode = batchImageStringPtr(code)
 	job.LastErrorMessage = batchImageOptionalStringPtr(message)
 	job.RetryCount++

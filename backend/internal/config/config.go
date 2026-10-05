@@ -1808,10 +1808,13 @@ func ChannelMonitorV2StoredRetention(period string) time.Duration {
 
 // DashboardAggregationRetentionConfig 预聚合保留窗口
 type DashboardAggregationRetentionConfig struct {
-	UsageLogsDays         int `mapstructure:"usage_logs_days"`
-	UsageBillingDedupDays int `mapstructure:"usage_billing_dedup_days"`
-	HourlyDays            int `mapstructure:"hourly_days"`
-	DailyDays             int `mapstructure:"daily_days"`
+	UsageLogsDays                         int  `mapstructure:"usage_logs_days"`
+	UsageBillingDedupDays                 int  `mapstructure:"usage_billing_dedup_days"`
+	UsageBillingDedupOrdinaryAutoDelete   bool `mapstructure:"usage_billing_dedup_ordinary_auto_delete"`
+	UsageBillingDedupVideoDeleteDays      int  `mapstructure:"usage_billing_dedup_video_delete_days"`
+	UsageBillingDedupBatchImageDeleteDays int  `mapstructure:"usage_billing_dedup_batch_image_delete_days"`
+	HourlyDays                            int  `mapstructure:"hourly_days"`
+	DailyDays                             int  `mapstructure:"daily_days"`
 }
 
 // UsageCleanupConfig 使用记录清理任务配置
@@ -2425,6 +2428,9 @@ func setDefaults() {
 	viper.SetDefault("dashboard_aggregation.backfill_max_days", 31)
 	viper.SetDefault("dashboard_aggregation.retention.usage_logs_days", 90)
 	viper.SetDefault("dashboard_aggregation.retention.usage_billing_dedup_days", 365)
+	viper.SetDefault("dashboard_aggregation.retention.usage_billing_dedup_ordinary_auto_delete", false)
+	viper.SetDefault("dashboard_aggregation.retention.usage_billing_dedup_video_delete_days", 0)
+	viper.SetDefault("dashboard_aggregation.retention.usage_billing_dedup_batch_image_delete_days", 0)
 	viper.SetDefault("dashboard_aggregation.retention.hourly_days", 180)
 	viper.SetDefault("dashboard_aggregation.retention.daily_days", 730)
 	viper.SetDefault("dashboard_aggregation.recompute_days", 2)
@@ -3262,6 +3268,21 @@ func (c *Config) Validate() error {
 		if c.Dashboard.StatsRefreshTimeoutSeconds < 0 {
 			return fmt.Errorf("dashboard_cache.stats_refresh_timeout_seconds must be non-negative")
 		}
+	}
+	if days := c.DashboardAgg.Retention.UsageBillingDedupVideoDeleteDays; days < 0 {
+		return fmt.Errorf("dashboard_aggregation.retention.usage_billing_dedup_video_delete_days must be non-negative")
+	} else if days > 0 {
+		stickySeconds := max(86400, c.Gateway.OpenAIWS.StickySessionTTLSeconds)
+		minimumDays := stickySeconds/86400 + 1
+		if stickySeconds%86400 != 0 {
+			minimumDays++
+		}
+		if days < minimumDays {
+			return fmt.Errorf("dashboard_aggregation.retention.usage_billing_dedup_video_delete_days must cover video binding TTL plus 24 hours")
+		}
+	}
+	if c.DashboardAgg.Retention.UsageBillingDedupBatchImageDeleteDays < 0 {
+		return fmt.Errorf("dashboard_aggregation.retention.usage_billing_dedup_batch_image_delete_days must be non-negative")
 	}
 	if c.DashboardAgg.Enabled {
 		if c.DashboardAgg.IntervalSeconds <= 0 {

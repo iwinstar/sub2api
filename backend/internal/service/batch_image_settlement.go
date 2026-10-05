@@ -150,6 +150,11 @@ func (s *BatchImageSettlementService) Settle(ctx context.Context, batchID string
 	}
 
 	if err := captureBatchImageBalanceHold(ctx, s.BillingRepo, job, actualCost, manifestHash); err != nil {
+		// A stale settlement rejected by the transactional state check is not a
+		// billing failure. Never advance retries or release funds on this path.
+		if errors.Is(err, ErrBatchImageSettlementInvalidStatus) {
+			return nil, ErrBatchImageSettlementInvalidStatus
+		}
 		msg := truncateBatchImageMessage(err.Error(), batchImageMaxErrorMessageLength)
 		if failErr := s.recordSettlementFailure(ctx, job, "SETTLEMENT_BILLING_FAILED", msg); failErr != nil {
 			return nil, failErr
@@ -193,11 +198,14 @@ func isBatchImageSettlementRetryExhausted(job *BatchImageJob) bool {
 }
 
 // recordSettlementFailure 记录一次结算失败并递增 retry_count。
-// 重试达到上限时立即走耗尽出口（释放冻结余额并转 failed）；
+// 重试达到上限时立即走耗尽出口（先转 failed，再释放冻结余额）；
 // 返回非 nil 时调用方应直接返回该错误。
 func (s *BatchImageSettlementService) recordSettlementFailure(ctx context.Context, job *BatchImageJob, code, message string) error {
 	retryCount, recordErr := s.Repo.SetBatchImageJobSettlementFailed(ctx, job.BatchID, code, truncateBatchImageMessage(message, batchImageMaxErrorMessageLength))
 	if recordErr != nil {
+		if errors.Is(recordErr, ErrBatchImageSettlementInvalidStatus) {
+			return ErrBatchImageSettlementInvalidStatus
+		}
 		logger.L().Warn("batch_image.settlement_failure_record_failed",
 			zap.String("batch_id", job.BatchID),
 			zap.String("code", code),
@@ -217,20 +225,8 @@ func (s *BatchImageSettlementService) failExhaustedSettlement(ctx context.Contex
 	if s == nil || s.Repo == nil {
 		return ErrBatchImageSettlementBillingFailed
 	}
-	// 释放指纹必须与其余所有释放点（processor/Cancel/recovery）一致地使用 RequestHash：
-	// 它们共享同一 request id，payloadHash 不同会触发 ErrUsageBillingRequestConflict，
-	// 导致后续 Cancel/重试永远失败、terminal job 变成毒消息。
-	if err := releaseBatchImageBalanceHold(ctx, s.BillingRepo, job, batchImageDerefString(job.RequestHash)); err != nil {
-		msg := truncateBatchImageMessage(err.Error(), batchImageMaxErrorMessageLength)
-		if _, recordErr := s.Repo.SetBatchImageJobSettlementFailed(ctx, job.BatchID, "SETTLEMENT_RELEASE_FAILED", msg); recordErr != nil {
-			logger.L().Warn("batch_image.settlement_release_failure_record_failed",
-				zap.String("batch_id", job.BatchID),
-				zap.Error(recordErr),
-			)
-		}
-		return ErrBatchImageSettlementBillingFailed.WithCause(err)
-	}
-	s.invalidateAuthCache(ctx, job.UserID)
+	// Transition under the repository's job-row lock before releasing. A stale
+	// in-memory settling job must not refund an already completed task.
 	msg := strings.TrimSpace(message)
 	if msg == "" {
 		msg = "settlement billing retry limit reached"
@@ -246,6 +242,15 @@ func (s *BatchImageSettlementService) failExhaustedSettlement(ctx context.Contex
 	}); err != nil {
 		return err
 	}
+	job.Status = BatchImageJobStatusFailed
+	// Use the same release fingerprint as Cancel/processor/recovery. Failed
+	// releases remain retryable through the terminal-hold worker path.
+	if err := releaseBatchImageBalanceHold(ctx, s.BillingRepo, job, batchImageDerefString(job.RequestHash)); err != nil {
+		// Preserve the hold error: the pipeline must retry this failed task,
+		// not treat it as a terminal settlement-billing failure and acknowledge it.
+		return err
+	}
+	s.invalidateAuthCache(ctx, job.UserID)
 	return ErrBatchImageSettlementBillingFailed
 }
 

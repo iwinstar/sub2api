@@ -348,7 +348,30 @@ func cleanupUsageLogsBatchWithRollupInvalidation(ctx context.Context, db *sql.DB
 
 func (r *dashboardAggregationRepository) CleanupUsageBillingDedup(ctx context.Context, cutoff time.Time) error {
 	for {
-		res, err := r.sql.ExecContext(ctx, `
+		affected, err := r.archiveUsageBillingDedupBatch(ctx, cutoff)
+		if err != nil {
+			return err
+		}
+		if affected < usageBillingDedupCleanupBatchSize {
+			return nil
+		}
+	}
+}
+
+func (r *dashboardAggregationRepository) archiveUsageBillingDedupBatch(ctx context.Context, cutoff time.Time) (int64, error) {
+	db, ok := r.sql.(*sql.DB)
+	if !ok {
+		return 0, fmt.Errorf("billing dedup maintenance requires sql.DB")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockBillingDedupMaintenance(ctx, tx); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `
 			WITH victims AS (
 				SELECT ctid, request_id, api_key_id, request_fingerprint, created_at
 				FROM usage_billing_dedup
@@ -363,17 +386,14 @@ func (r *dashboardAggregationRepository) CleanupUsageBillingDedup(ctx context.Co
 			DELETE FROM usage_billing_dedup
 			WHERE ctid IN (SELECT ctid FROM victims)
 		`, cutoff.UTC(), usageBillingDedupCleanupBatchSize)
-		if err != nil {
-			return err
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if affected < usageBillingDedupCleanupBatchSize {
-			return nil
-		}
+	if err != nil {
+		return 0, err
 	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return affected, tx.Commit()
 }
 
 func (r *dashboardAggregationRepository) EnsureUsageLogsPartitions(ctx context.Context, now time.Time) error {

@@ -110,20 +110,21 @@ func (r *usageBillingRepository) claimUsageBillingRequest(ctx context.Context, t
 }
 
 func (r *usageBillingRepository) ReserveBatchImageBalance(ctx context.Context, cmd *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error) {
-	return r.applyBatchImageBalanceHold(ctx, cmd, reserveUsageBillingBatchImageBalance)
+	return r.applyBatchImageBalanceHold(ctx, cmd, false, reserveUsageBillingBatchImageBalance)
 }
 
 func (r *usageBillingRepository) CaptureBatchImageBalance(ctx context.Context, cmd *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error) {
-	return r.applyBatchImageBalanceHold(ctx, cmd, captureUsageBillingBatchImageBalance)
+	return r.applyBatchImageBalanceHold(ctx, cmd, true, captureUsageBillingBatchImageBalance)
 }
 
 func (r *usageBillingRepository) ReleaseBatchImageBalance(ctx context.Context, cmd *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error) {
-	return r.applyBatchImageBalanceHold(ctx, cmd, releaseUsageBillingBatchImageBalance)
+	return r.applyBatchImageBalanceHold(ctx, cmd, false, releaseUsageBillingBatchImageBalance)
 }
 
 func (r *usageBillingRepository) applyBatchImageBalanceHold(
 	ctx context.Context,
 	cmd *service.BatchImageBalanceHoldCommand,
+	capture bool,
 	apply func(context.Context, *sql.Tx, *service.BatchImageBalanceHoldCommand) (*service.BatchImageBalanceHoldResult, error),
 ) (_ *service.BatchImageBalanceHoldResult, err error) {
 	if cmd == nil {
@@ -147,6 +148,18 @@ func (r *usageBillingRepository) applyBatchImageBalanceHold(
 		}
 	}()
 
+	// Lock before claiming the key: cleanup locks the job before deleting its keys.
+	// A settlement that outlived the terminal transition must never charge again.
+	if capture {
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM batch_image_jobs
+			WHERE batch_id = $1 AND api_key_id = $2 FOR SHARE`, cmd.BatchID, cmd.APIKeyID).Scan(&status); err != nil {
+			return nil, err
+		}
+		if status != service.BatchImageJobStatusSettling {
+			return nil, service.ErrBatchImageSettlementInvalidStatus
+		}
+	}
 	applied, err := r.claimUsageBillingRequest(ctx, tx, cmd.RequestID, cmd.APIKeyID, cmd.RequestFingerprint)
 	if err != nil {
 		return nil, err
