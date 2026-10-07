@@ -114,11 +114,8 @@ func TestApplyUsageBillingEffects_DeletedAPIKeyStillBillsBalance(t *testing.T) {
 		WithArgs(10.0, int64(42)).
 		WillReturnRows(sqlmock.NewRows([]string{"balance"}).AddRow(90.0))
 	mock.ExpectQuery(apiKeyQuotaIncrementSQL).
-		WithArgs(10.0, int64(7), service.StatusAPIKeyActive, service.StatusAPIKeyQuotaExhausted).
+		WithArgs(10.0, int64(7), service.StatusAPIKeyActive, service.StatusAPIKeyQuotaExhausted, 10.0).
 		WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec(apiKeyRateLimitIncrementSQL).
-		WithArgs(10.0, int64(7)).
-		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
 	result := &service.UsageBillingApplyResult{Applied: true}

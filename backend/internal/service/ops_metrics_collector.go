@@ -55,6 +55,8 @@ type OpsMetricsCollector struct {
 	redisClient *redis.Client
 	instanceID  string
 
+	billingDBWait billingDBWaitSampler
+
 	lastCgroupCPUUsageNanos uint64
 	lastCgroupCPUSampleAt   time.Time
 
@@ -179,6 +181,9 @@ func (c *OpsMetricsCollector) collectOnce() {
 	if !c.isMonitoringEnabled(ctx) {
 		return
 	}
+
+	// Sample every instance before leader election; these are local pool counters.
+	c.logDBPoolWait()
 
 	release, ok := c.tryAcquireLeaderLock(ctx)
 	if !ok {

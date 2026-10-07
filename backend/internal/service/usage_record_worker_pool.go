@@ -86,11 +86,14 @@ type UsageRecordWorkerPoolStats struct {
 	DroppedQueueFull   uint64
 	DroppedPoolStopped uint64
 	SyncFallbackTasks  uint64
+	OldestPendingAge   time.Duration
 }
 
 // UsageRecordWorkerPool 提供“有界队列 + 固定 worker”的异步执行器。
 // 用于替代请求路径里的直接 goroutine，避免高并发时无界堆积。
 type UsageRecordWorkerPool struct {
+	pending               usageRecordPendingTasks
+	statsCancel           context.CancelFunc
 	pool                  pond.Pool
 	taskTimeout           time.Duration
 	overflowPolicy        string
@@ -147,6 +150,7 @@ func NewUsageRecordWorkerPoolWithOptions(opts UsageRecordWorkerPoolOptions) *Usa
 	if p.autoScaleEnabled {
 		p.startAutoScaler()
 	}
+	p.startStatsLogger()
 	return p
 }
 
@@ -162,10 +166,7 @@ func (p *UsageRecordWorkerPool) Submit(task UsageRecordTask) UsageRecordSubmitMo
 		return UsageRecordSubmitModeDroppedStopped
 	}
 
-	_, ok := p.pool.TrySubmit(func() {
-		p.execute(task)
-	})
-	if ok {
+	if p.trySubmitTracked(task) {
 		return UsageRecordSubmitModeEnqueued
 	}
 
@@ -210,6 +211,7 @@ func (p *UsageRecordWorkerPool) Stats() UsageRecordWorkerPoolStats {
 		DroppedQueueFull:   p.droppedQueueFull.Load(),
 		DroppedPoolStopped: p.droppedPoolStopped.Load(),
 		SyncFallbackTasks:  p.syncFallback.Load(),
+		OldestPendingAge:   p.pending.oldestAge(),
 	}
 }
 
@@ -219,6 +221,9 @@ func (p *UsageRecordWorkerPool) Stop() {
 		return
 	}
 	p.stopOnce.Do(func() {
+		if p.statsCancel != nil {
+			p.statsCancel()
+		}
 		if p.autoScaleCancel != nil {
 			p.autoScaleCancel()
 		}
