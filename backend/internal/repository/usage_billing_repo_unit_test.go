@@ -119,7 +119,7 @@ func TestApplyUsageBillingEffects_DeletedAPIKeyStillBillsBalance(t *testing.T) {
 	mock.ExpectCommit()
 
 	result := &service.UsageBillingApplyResult{Applied: true}
-	err = (&usageBillingRepository{}).applyUsageBillingEffects(ctx, tx, &service.UsageBillingCommand{
+	err = (&usageBillingRepository{optimizedWrites: true}).applyUsageBillingEffects(ctx, tx, &service.UsageBillingCommand{
 		UserID:              42,
 		APIKeyID:            7,
 		BalanceCost:         10,

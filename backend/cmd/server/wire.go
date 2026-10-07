@@ -110,6 +110,7 @@ func provideCleanup(
 	emailQueue *service.EmailQueueService,
 	billingCache *service.BillingCacheService,
 	usageRecordWorkerPool *service.UsageRecordWorkerPool,
+	usageBillingBatchRepository *repository.UsageBillingBatchRepository,
 	subscriptionService *service.SubscriptionService,
 	oauth *service.OAuthService,
 	openaiOAuth *service.OpenAIOAuthService,
@@ -438,6 +439,9 @@ func provideCleanup(
 		}
 
 		runParallel(parallelSteps)
+		if usageBillingBatchRepository != nil {
+			usageBillingBatchRepository.Stop()
+		}
 		runSequential(infraSteps)
 
 		// Check if context timed out

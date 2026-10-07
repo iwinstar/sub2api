@@ -29,10 +29,14 @@ func TestBillingWritePerformance(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
+	originalMaxOpen := integrationDB.Stats().MaxOpenConnections
 	integrationDB.SetMaxOpenConns(33) // 32 writers plus one lock sampler.
-	integrationDB.SetMaxIdleConns(33)
-	defer integrationDB.SetMaxOpenConns(0)
-	defer integrationDB.SetMaxIdleConns(2)
+	integrationDB.SetMaxIdleConns(33) // Keep writer connections warm between comparison cases.
+	defer func() {
+		// The integration harness leaves MaxIdleConns at database/sql's default.
+		integrationDB.SetMaxIdleConns(2)
+		integrationDB.SetMaxOpenConns(originalMaxOpen)
+	}()
 	for _, users := range []int{500, 5000} {
 		for _, accounts := range []int{1, 5, 20} {
 			for _, size := range []int{512, 8192, 32768} {
@@ -52,13 +56,21 @@ func TestBillingWritePerformance(t *testing.T) {
 	}
 }
 
+type billingBenchmarkLayoutKey struct{}
+
 type billingWriteTiming struct {
 	total, begin, claim, balance, key, account, commit time.Duration
 	err                                                error
 }
 
-func runBillingWriteComparison(t *testing.T, ctx context.Context, users, accounts, size int, paced, combined bool) {
-	const operations = 5000
+func runBillingWriteComparison(t *testing.T, ctx context.Context, users, accounts, size int, paced, combined bool, automatic ...bool) {
+	operations := 5000
+	if len(automatic) > 0 {
+		operations = 10000
+		if paced {
+			operations = 33334
+		}
+	}
 	prefix := "billing-perf-" + uuid.NewString()
 	var userIDs, keyIDs, accountIDs []int64
 	// Each subtest cleans only its own rows. The container is also terminated by TestMain.
@@ -109,11 +121,31 @@ func runBillingWriteComparison(t *testing.T, ctx context.Context, users, account
 		padding.WriteString(hex.EncodeToString(sum[:]))
 	}
 	for i := 0; i < accounts; i++ {
+		if layout, _ := ctx.Value(billingBenchmarkLayoutKey{}).(string); layout == "colliding" {
+			// Simulate a sparse set of active accounts, not consecutive fixture IDs.
+			var id int64
+			for {
+				require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT nextval(pg_get_serial_sequence('accounts','id'))`).Scan(&id))
+				if (id+1)%billingBatchWorkers == 0 {
+					break
+				}
+			}
+		}
 		account := mustCreateAccount(t, testEntClient(t), &service.Account{Name: prefix, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
 			Extra: map[string]any{"quota_limit": 100000, "quota_daily_limit": 100000, "quota_weekly_limit": 100000, "padding": padding.String()}})
 		accountIDs = append(accountIDs, account.ID)
 	}
 	repo := &usageBillingRepository{db: integrationDB}
+	var queue *UsageBillingBatchRepository
+	if len(automatic) > 0 && automatic[0] {
+		queue = NewUsageBillingBatchRepository(repo)
+		defer queue.Stop()
+	}
+	workers := 32
+	if len(automatic) > 0 {
+		workers = 128
+	}
+
 	// Reserve a connection so lock observation never competes with writer slots.
 	observer, err := integrationDB.Conn(ctx)
 	require.NoError(t, err)
@@ -151,7 +183,7 @@ func runBillingWriteComparison(t *testing.T, ctx context.Context, users, account
 	start := time.Now()
 	poolBefore := integrationDB.Stats()
 	var wg sync.WaitGroup
-	for worker := 0; worker < 32; worker++ {
+	for worker := 0; worker < workers; worker++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -162,7 +194,21 @@ func runBillingWriteComparison(t *testing.T, ctx context.Context, users, account
 				} // 100k RPM.
 				cmd := &service.UsageBillingCommand{RequestID: fmt.Sprintf("%s-%d", prefix, i), APIKeyID: keyIDs[i%users], UserID: userIDs[i%users], AccountID: accountIDs[i%accounts],
 					AccountType: service.AccountTypeAPIKey, BalanceCost: 0.01, APIKeyQuotaCost: 0.01, APIKeyRateLimitCost: 0.02, AccountQuotaCost: 0.01}
-				timings[i] = measureBillingWrite(ctx, repo, cmd, combined)
+				if len(automatic) == 0 {
+					timings[i] = measureBillingWrite(ctx, repo, cmd, combined)
+				} else {
+					var result *service.UsageBillingApplyResult
+					var err error
+					if queue != nil {
+						result, err = queue.Apply(ctx, cmd)
+					} else {
+						result, err = repo.apply(ctx, cmd, false)
+					}
+					if err == nil && (result == nil || !result.Applied) {
+						err = fmt.Errorf("operation not applied")
+					}
+					timings[i].err = err
+				}
 				timings[i].total = time.Since(scheduled)
 			}
 		}()
@@ -192,10 +238,10 @@ func runBillingWriteComparison(t *testing.T, ctx context.Context, users, account
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT sum(100000-balance) FROM users WHERE id=ANY($1)", pq.Array(userIDs)).Scan(&deducted))
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT sum(quota_used),sum(usage_5h) FROM api_keys WHERE id=ANY($1)", pq.Array(keyIDs)).Scan(&used, &windowUsed))
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT sum((extra->>'quota_used')::numeric) FROM accounts WHERE id=ANY($1)", pq.Array(accountIDs)).Scan(&accountUsed))
-	require.InDelta(t, 50, deducted, 1e-6)
-	require.InDelta(t, 50, used, 1e-6)
-	require.InDelta(t, 100, windowUsed, 1e-6)
-	require.InDelta(t, 50, accountUsed, 1e-6)
+	require.InDelta(t, float64(operations)*0.01, deducted, 1e-6)
+	require.InDelta(t, float64(operations)*0.01, used, 1e-6)
+	require.InDelta(t, float64(operations)*0.02, windowUsed, 1e-6)
+	require.InDelta(t, float64(operations)*0.01, accountUsed, 1e-6)
 	report := map[string]any{"scenario": t.Name(), "operations": operations, "elapsed_ms": float64(elapsed) / float64(time.Millisecond),
 		"pool_wait_count": poolAfter.WaitCount - poolBefore.WaitCount, "pool_wait_ms": float64(poolAfter.WaitDuration-poolBefore.WaitDuration) / float64(time.Millisecond),
 		"lock_wait_samples": lockSamples, "blocked_samples": blockedSamples, "samples": samples}
@@ -213,6 +259,33 @@ func runBillingWriteComparison(t *testing.T, ctx context.Context, users, account
 		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
 		report[name+"_p99_ms"] = float64(values[(len(values)-1)*99/100]) / float64(time.Millisecond)
 		report[name+"_avg_ms"] = float64(total) / float64(len(values)) / float64(time.Millisecond)
+	}
+	if len(automatic) > 0 {
+		shards := make([]int, billingBatchWorkers)
+		for _, id := range accountIDs {
+			shards[id%billingBatchWorkers]++
+		}
+		report["account_modulo_shards"] = shards
+		report["transactions"] = int64(operations)
+		if queue != nil {
+			assigned := make([]int, billingBatchWorkers)
+			for _, id := range accountIDs {
+				assigned[queue.accountShard(id)]++
+			}
+			report["assigned_account_shards"] = assigned
+			report["transactions"] = queue.transactions.Load()
+			report["batches"] = queue.batches.Load()
+			report["batched_operations"] = queue.batchedOperations.Load()
+			report["max_queue_age_ms"] = float64(queue.maxQueueAgeNanos.Load()) / float64(time.Millisecond)
+		}
+		data, err := json.Marshal(report)
+		require.NoError(t, err)
+		label := "BILLING_BATCH_RESULT "
+		if ctx.Value(billingBenchmarkLayoutKey{}) != nil {
+			label = "BILLING_SHARD_RESULT "
+		}
+		t.Log(label + string(data))
+		return
 	}
 	data, err := json.Marshal(report)
 	require.NoError(t, err)
@@ -269,4 +342,51 @@ func measureBillingWrite(ctx context.Context, repo *usageBillingRepository, cmd 
 	v.err = tx.Commit()
 	v.commit = time.Since(start)
 	return
+}
+
+// Both modes use 128 callers and 32 writer connections. All fixture
+// rows and triggers are in TestMain's disposable database, never an external DSN.
+func TestBillingBatchPerformance(t *testing.T) {
+	if os.Getenv("SUB2API_BILLING_WRITE_BENCH") != "1" {
+		t.Skip("GitHub-only opt-in billing comparison")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	original := integrationDB.Stats().MaxOpenConnections
+	integrationDB.SetMaxOpenConns(33)
+	integrationDB.SetMaxIdleConns(33)
+	defer func() { integrationDB.SetMaxIdleConns(2); integrationDB.SetMaxOpenConns(original) }()
+	for _, users := range []int{500, 5000} {
+		for _, accounts := range []int{1, 5, 20} {
+			for _, paced := range []bool{false, true} {
+				order := []bool{false, true}
+				if paced {
+					order = []bool{true, false}
+				}
+				for _, automatic := range order {
+					t.Run(fmt.Sprintf("users=%d/accounts=%d/paced=%t/automatic=%t", users, accounts, paced, automatic), func(t *testing.T) { runBillingWriteComparison(t, ctx, users, accounts, 8192, paced, true, automatic) })
+				}
+			}
+		}
+	}
+}
+
+func TestBillingBatchShardPerformance(t *testing.T) {
+	if os.Getenv("SUB2API_BILLING_WRITE_BENCH") != "1" {
+		t.Skip("opt-in billing diagnostics")
+	}
+	original := integrationDB.Stats().MaxOpenConnections
+	integrationDB.SetMaxOpenConns(33)
+	integrationDB.SetMaxIdleConns(33)
+	defer func() { integrationDB.SetMaxIdleConns(2); integrationDB.SetMaxOpenConns(original) }()
+	for repeat := 0; repeat < 3; repeat++ {
+		for _, accounts := range []int{5, 20} {
+			for _, layout := range []string{"consecutive", "colliding"} {
+				t.Run(fmt.Sprintf("repeat=%d/accounts=%d/layout=%s", repeat, accounts, layout), func(t *testing.T) {
+					ctx := context.WithValue(context.Background(), billingBenchmarkLayoutKey{}, layout)
+					runBillingWriteComparison(t, ctx, 500, accounts, 8192, false, true, true)
+				})
+			}
+		}
+	}
 }

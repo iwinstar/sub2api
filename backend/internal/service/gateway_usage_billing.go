@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -372,6 +374,36 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 	result, err := repo.Apply(billingCtx, cmd)
 	if err != nil {
 		return false, err
+	}
+
+	if result != nil && result.ConfirmedExisting {
+		// Dedup proves settlement, but not whether another caller already ran
+		// incremental cache writes. Invalidate only; no fabricated snapshots or
+		// threshold notifications. The committed account outbox refreshes quota.
+		recoveryCtx, recoveryCancel := detachedBillingContext(ctx)
+		defer recoveryCancel()
+		if deps.billingCacheService != nil {
+			var cacheErr error
+			if p.User != nil {
+				cacheErr = deps.billingCacheService.InvalidateUserBalance(recoveryCtx, p.User.ID)
+				if p.APIKey != nil && p.APIKey.GroupID != nil {
+					cacheErr = errors.Join(cacheErr, deps.billingCacheService.InvalidateSubscription(recoveryCtx, p.User.ID, *p.APIKey.GroupID))
+				}
+			}
+			if p.APIKey != nil {
+				cacheErr = errors.Join(cacheErr, deps.billingCacheService.InvalidateAPIKeyRateLimit(recoveryCtx, p.APIKey.ID))
+			}
+			if cacheErr != nil {
+				slog.Warn("billing recovery cache invalidation failed", "request_id", cmd.RequestID, "error", cacheErr)
+			}
+		}
+		if invalidator, ok := p.APIKeyService.(apiKeyAuthCacheInvalidator); ok && p.APIKey != nil {
+			invalidator.InvalidateAuthCacheByKey(recoveryCtx, p.APIKey.Key)
+		}
+		if deps.deferredService != nil && p.Account != nil {
+			deps.deferredService.ScheduleLastUsedUpdate(p.Account.ID)
+		}
+		return true, nil
 	}
 
 	if result == nil || !result.Applied {
@@ -918,6 +950,10 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	}, s.billingDeps(), s.usageBillingRepo)
 
 	if billingErr != nil {
+		if errors.Is(billingErr, ErrUsageBillingOutcomeUnknown) {
+			slog.Error("billing outcome unconfirmed; manual reconciliation required", "request_id", usageLog.RequestID, "api_key_id", apiKey.ID, "usage_log", billingUsageAudit(usageLog), "error", billingErr)
+			return billingErr
+		}
 		usageLog.ActualCost = 0
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
 		return billingErr
@@ -1275,4 +1311,16 @@ func optionalSubscriptionID(subscription *UserSubscription) *int64 {
 		return &subscription.ID
 	}
 	return nil
+}
+
+// Preserve the complete usage/cost snapshot without serializing linked entities
+// (which can include API keys, credentials and password hashes).
+func billingUsageAudit(usage *UsageLog) string {
+	snapshot := *usage
+	snapshot.User, snapshot.APIKey, snapshot.Account, snapshot.Group, snapshot.Subscription = nil, nil, nil, nil, nil
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Sprintf("%+v", snapshot)
+	}
+	return string(data)
 }

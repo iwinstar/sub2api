@@ -63,6 +63,29 @@ func ProvideSchedulerCache(rdb *redis.Client, cfg *config.Config) service.Schedu
 	return newSchedulerCacheWithChunkSizes(rdb, mgetChunkSize, writeChunkSize)
 }
 
+// ProvideUsageBillingBatchRepository starts batch workers only when enabled.
+func ProvideUsageBillingBatchRepository(base *usageBillingRepository, cfg *config.Config) *UsageBillingBatchRepository {
+	base.optimizedWrites = cfg != nil && cfg.Billing.AutomaticBatchEnabled
+	if cfg == nil || !cfg.Billing.AutomaticBatchEnabled {
+		return nil
+	}
+	return NewUsageBillingBatchRepository(base)
+}
+
+func ProvideBillingAccountRepository(client *ent.Client, db *sql.DB, cache service.SchedulerCache, cfg *config.Config) service.AccountRepository {
+	r := newAccountRepositoryWithSQL(client, db, cache)
+	r.optimizedBillingWrites = cfg != nil && cfg.Billing.AutomaticBatchEnabled
+	return r
+}
+
+// ProvideUsageBillingRepository keeps disabled billing on the direct single path.
+func ProvideUsageBillingRepository(base *usageBillingRepository, batch *UsageBillingBatchRepository) service.UsageBillingRepository {
+	if batch != nil {
+		return batch
+	}
+	return base
+}
+
 // ProviderSet is the Wire provider set for all repositories
 var ProviderSet = wire.NewSet(
 	NewUserRepository,
@@ -70,7 +93,7 @@ var ProviderSet = wire.NewSet(
 	NewGroupRepository,
 	NewAdminGroupRepository,
 	NewCompositeModelRouteRepository,
-	NewAccountRepository,
+	ProvideBillingAccountRepository,
 	NewAdminAccountRepository,
 	NewScheduledTestPlanRepository,   // 定时测试计划仓储
 	NewScheduledTestResultRepository, // 定时测试结果仓储
@@ -81,6 +104,8 @@ var ProviderSet = wire.NewSet(
 	NewAnnouncementReadRepository,
 	NewUsageLogRepository,
 	NewUsageBillingRepository,
+	ProvideUsageBillingBatchRepository,
+	ProvideUsageBillingRepository,
 	NewBatchImageRepository,
 	NewIdempotencyRepository,
 	NewUsageCleanupRepository,

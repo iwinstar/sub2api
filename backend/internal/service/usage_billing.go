@@ -13,6 +13,10 @@ import (
 )
 
 var ErrUsageBillingRequestIDRequired = errors.New("usage billing request_id is required")
+
+// ErrUsageBillingOutcomeUnknown means a COMMIT may have succeeded. Never log it as zero cost.
+var ErrUsageBillingOutcomeUnknown = errors.New("usage billing commit outcome is unknown")
+
 var ErrUsageBillingRequestConflict = errors.New("usage billing request fingerprint conflict")
 
 // UsageBillingCommand describes one billable request that must be applied at most once.
@@ -163,6 +167,8 @@ type AccountQuotaState struct {
 }
 
 type UsageBillingApplyResult struct {
+	// ConfirmedExisting is set only by COMMIT recovery; it carries no balance snapshot.
+	ConfirmedExisting    bool
 	Applied              bool
 	APIKeyQuotaExhausted bool
 	NewBalance           *float64           // post-deduction balance (nil = no balance deduction)

@@ -183,7 +183,9 @@ func (c *OpsMetricsCollector) collectOnce() {
 	}
 
 	// Sample every instance before leader election; these are local pool counters.
-	c.logDBPoolWait()
+	if c.cfg != nil && c.cfg.Billing.AutomaticBatchEnabled {
+		c.logDBPoolWait()
+	}
 
 	release, ok := c.tryAcquireLeaderLock(ctx)
 	if !ok {

@@ -36,13 +36,14 @@ func (c *OpsMetricsCollector) logDBPoolWait() {
 	if !ok {
 		return
 	}
-	logger.L().Info("billing.db_pool_wait",
+	logger.L().Info("db.pool_wait",
 		zap.String("component", "service.ops_metrics_collector"),
 		zap.String("instance_id", c.instanceID),
 		zap.Float64("sample_interval_seconds", interval.Seconds()),
 		zap.Int64("wait_count_delta", count),
 		zap.Float64("wait_duration_ms_delta", float64(duration)/float64(time.Millisecond)),
-		zap.Int("in_use", stats.InUse), zap.Int("idle", stats.Idle))
+		zap.Int("in_use", stats.InUse), zap.Int("idle", stats.Idle),
+		zap.Int("max_open", stats.MaxOpenConnections))
 }
 
 // Track only tasks that have not started. O(1) insertion/removal and oldest
@@ -53,19 +54,27 @@ type usageRecordPendingTasks struct {
 }
 
 func (p *UsageRecordWorkerPool) trySubmitTracked(task UsageRecordTask) bool {
+	if !p.billingWriteObservabilityEnabled {
+		_, ok := p.pool.TrySubmit(func() { p.execute(task) })
+		return ok
+	}
 	p.pending.mu.Lock()
-	defer p.pending.mu.Unlock()
 	entry := p.pending.tasks.PushBack(time.Now())
+	p.pending.mu.Unlock()
 	_, ok := p.pool.TrySubmit(func() {
-		p.pending.mu.Lock()
-		p.pending.tasks.Remove(entry)
-		p.pending.mu.Unlock()
+		p.pending.remove(entry)
 		p.execute(task)
 	})
 	if !ok {
-		p.pending.tasks.Remove(entry)
+		p.pending.remove(entry)
 	}
 	return ok
+}
+
+func (p *usageRecordPendingTasks) remove(entry *list.Element) {
+	p.mu.Lock()
+	p.tasks.Remove(entry)
+	p.mu.Unlock()
 }
 
 func (p *usageRecordPendingTasks) oldestAge() time.Duration {

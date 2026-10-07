@@ -42,6 +42,8 @@ import (
 //   - sql: 原生 SQL 执行器，用于复杂查询和批量操作
 //   - schedulerCache: 调度器缓存，用于在账号状态变更时同步快照
 type accountRepository struct {
+	optimizedBillingWrites bool
+
 	client *dbent.Client // Ent ORM 客户端
 	sql    sqlExecutor   // 原生 SQL 执行接口
 	// schedulerCache 用于在账号状态变更时主动同步快照到缓存，
@@ -1441,7 +1443,13 @@ func (r *accountRepository) BatchUpdateLastUsed(ctx context.Context, updates map
 		idx += 2
 	}
 
-	caseSQL += " END, updated_at = NOW() WHERE id = ANY($" + itoa(idx) + ") AND deleted_at IS NULL"
+	if r.optimizedBillingWrites {
+		// Materialize sorted row locks before the UPDATE, matching billing batches.
+		caseSQL += " END, updated_at = NOW() WHERE id IN (SELECT id FROM locked) AND deleted_at IS NULL"
+		caseSQL = "WITH locked AS MATERIALIZED (SELECT id FROM accounts WHERE id = ANY($" + itoa(idx) + ") AND deleted_at IS NULL ORDER BY id FOR NO KEY UPDATE) " + caseSQL
+	} else {
+		caseSQL += " END, updated_at = NOW() WHERE id = ANY($" + itoa(idx) + ") AND deleted_at IS NULL"
+	}
 	args = append(args, pq.Array(ids))
 
 	_, err := r.sql.ExecContext(ctx, caseSQL, args...)

@@ -1185,6 +1185,9 @@ billing:
     # billing model), reject it instead of admitting it without reservation.
     # 无法为请求定价（计费模型无基础/分组/渠道定价）时拒绝请求；默认 false 为放行不预留（节流告警日志）
     fail_closed_on_unpriced: false
+  # Billing write optimization, disabled by default; changes require a restart.
+  # 计费写入优化，默认关闭；修改后需重启。
+  automatic_batch_enabled: false
 
 # =============================================================================
 # Turnstile Configuration

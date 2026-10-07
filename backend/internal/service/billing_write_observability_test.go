@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,7 +32,7 @@ func TestBillingDBWaitSampler(t *testing.T) {
 }
 
 func TestUsageRecordPendingAge(t *testing.T) {
-	pool := NewUsageRecordWorkerPoolWithOptions(UsageRecordWorkerPoolOptions{WorkerCount: 1, QueueSize: 1, OverflowPolicy: "drop"})
+	pool := NewUsageRecordWorkerPoolWithOptions(UsageRecordWorkerPoolOptions{BillingWriteObservabilityEnabled: true, WorkerCount: 1, QueueSize: 1, OverflowPolicy: "drop"})
 	started, release, ran := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	// Unblock before Stop even if an assertion fails.
 	defer pool.Stop()
@@ -55,4 +56,17 @@ func TestUsageRecordPendingAge(t *testing.T) {
 		t.Fatal("queued task did not run")
 	}
 	require.Zero(t, pool.Stats().OldestPendingAge)
+}
+
+func TestBillingWriteObservabilityConfiguration(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := &config.Config{}
+		cfg.Billing.AutomaticBatchEnabled = enabled
+		opts := usageRecordPoolOptionsFromConfig(cfg)
+		require.Equal(t, enabled, opts.BillingWriteObservabilityEnabled)
+		opts.WorkerCount, opts.QueueSize = 1, 1
+		pool := NewUsageRecordWorkerPoolWithOptions(opts)
+		require.Equal(t, enabled, pool.statsCancel != nil)
+		pool.Stop()
+	}
 }

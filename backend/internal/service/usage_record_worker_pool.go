@@ -57,6 +57,8 @@ func (m UsageRecordSubmitMode) Dropped() bool {
 
 // UsageRecordWorkerPoolOptions 使用量记录池配置。
 type UsageRecordWorkerPoolOptions struct {
+	BillingWriteObservabilityEnabled bool
+
 	WorkerCount           int
 	QueueSize             int
 	TaskTimeout           time.Duration
@@ -92,6 +94,8 @@ type UsageRecordWorkerPoolStats struct {
 // UsageRecordWorkerPool 提供“有界队列 + 固定 worker”的异步执行器。
 // 用于替代请求路径里的直接 goroutine，避免高并发时无界堆积。
 type UsageRecordWorkerPool struct {
+	billingWriteObservabilityEnabled bool
+
 	pending               usageRecordPendingTasks
 	statsCancel           context.CancelFunc
 	pool                  pond.Pool
@@ -129,6 +133,8 @@ func NewUsageRecordWorkerPoolWithOptions(opts UsageRecordWorkerPoolOptions) *Usa
 	opts = normalizeUsageRecordPoolOptions(opts)
 
 	p := &UsageRecordWorkerPool{
+		billingWriteObservabilityEnabled: opts.BillingWriteObservabilityEnabled,
+
 		taskTimeout:           opts.TaskTimeout,
 		overflowPolicy:        opts.OverflowPolicy,
 		overflowSamplePercent: opts.OverflowSamplePercent,
@@ -150,7 +156,9 @@ func NewUsageRecordWorkerPoolWithOptions(opts UsageRecordWorkerPoolOptions) *Usa
 	if p.autoScaleEnabled {
 		p.startAutoScaler()
 	}
-	p.startStatsLogger()
+	if p.billingWriteObservabilityEnabled {
+		p.startStatsLogger()
+	}
 	return p
 }
 
@@ -388,6 +396,7 @@ func usageRecordPoolOptionsFromConfig(cfg *config.Config) UsageRecordWorkerPoolO
 	if cfg == nil {
 		return opts
 	}
+	opts.BillingWriteObservabilityEnabled = cfg.Billing.AutomaticBatchEnabled
 	if cfg.Gateway.UsageRecord.WorkerCount > 0 {
 		opts.WorkerCount = cfg.Gateway.UsageRecord.WorkerCount
 	}

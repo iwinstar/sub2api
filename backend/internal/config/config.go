@@ -908,7 +908,9 @@ func normalizeProxyProbeURLs(targets []ProbeURLConfig) ([]ProbeURLConfig, error)
 }
 
 type BillingConfig struct {
-	CircuitBreaker CircuitBreakerConfig `mapstructure:"circuit_breaker"`
+	// AutomaticBatchEnabled enables billing write optimizations, including queued batches; read at startup.
+	AutomaticBatchEnabled bool                 `mapstructure:"automatic_batch_enabled"`
+	CircuitBreaker        CircuitBreakerConfig `mapstructure:"circuit_breaker"`
 	// MinimumBalanceReserve is the conservative preflight floor for balance billing.
 	// Requests in balance mode are rejected when the cached balance is below this
 	// amount, even if it is still positive. Set to 0 to keep the legacy balance > 0 gate.
@@ -2149,6 +2151,7 @@ func setDefaults() {
 	viper.SetDefault("security.proxy_fallback.allow_direct_on_error", false)
 
 	// Billing
+	viper.SetDefault("billing.automatic_batch_enabled", false)
 	viper.SetDefault("billing.circuit_breaker.enabled", true)
 	viper.SetDefault("billing.circuit_breaker.failure_threshold", 5)
 	viper.SetDefault("billing.circuit_breaker.reset_timeout_seconds", 30)

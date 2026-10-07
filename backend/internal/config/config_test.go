@@ -2699,3 +2699,25 @@ func TestChannelMonitorV2InvalidRetentionConfig(t *testing.T) {
 		t.Fatalf("expected invalid retention config, got %v", err)
 	}
 }
+
+func TestBillingAutomaticBatchConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		want        bool
+	}{{"default", "", false}, {"enabled", "true", true}, {"disabled", "false", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			t.Setenv("BILLING_AUTOMATIC_BATCH_ENABLED", "")
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			contents := "{}\n"
+			if tc.value != "" {
+				contents = "billing:\n  automatic_batch_enabled: " + tc.value + "\n"
+			}
+			require.NoError(t, os.WriteFile(path, []byte(contents), 0600))
+			t.Setenv("CONFIG_FILE", path)
+			cfg, err := Load()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, cfg.Billing.AutomaticBatchEnabled)
+		})
+	}
+}

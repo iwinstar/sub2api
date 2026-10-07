@@ -12,14 +12,19 @@ import (
 )
 
 type usageBillingRepository struct {
-	db *sql.DB
+	db              *sql.DB
+	optimizedWrites bool
 }
 
-func NewUsageBillingRepository(_ *dbent.Client, sqlDB *sql.DB) service.UsageBillingRepository {
+func NewUsageBillingRepository(_ *dbent.Client, sqlDB *sql.DB) *usageBillingRepository {
 	return &usageBillingRepository{db: sqlDB}
 }
 
-func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBillingCommand) (_ *service.UsageBillingApplyResult, err error) {
+func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBillingCommand) (*service.UsageBillingApplyResult, error) {
+	return r.apply(ctx, cmd, false)
+}
+
+func (r *usageBillingRepository) apply(ctx context.Context, cmd *service.UsageBillingCommand, lockTimeout bool) (_ *service.UsageBillingApplyResult, err error) {
 	if cmd == nil {
 		return &service.UsageBillingApplyResult{}, nil
 	}
@@ -42,6 +47,12 @@ func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBi
 		}
 	}()
 
+	if lockTimeout {
+		if _, err := tx.ExecContext(ctx, billingLockTimeoutSQL); err != nil {
+			return nil, err
+		}
+	}
+
 	applied, err := r.claimUsageBillingKey(ctx, tx, cmd)
 	if err != nil {
 		return nil, err
@@ -55,7 +66,12 @@ func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBi
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if r.optimizedWrites || lockTimeout {
+		err = commitUsageBilling(ctx, tx)
+	} else {
+		err = tx.Commit()
+	}
+	if err != nil {
 		return nil, err
 	}
 	tx = nil
@@ -201,7 +217,8 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 	}
 
 	// Key 已不存在时跳过其自身的额度/限速计数，其余结算项不受影响。
-	if cmd.APIKeyQuotaCost > 0 && cmd.APIKeyRateLimitCost > 0 {
+	combinedKey := r.optimizedWrites && cmd.APIKeyQuotaCost > 0 && cmd.APIKeyRateLimitCost > 0
+	if combinedKey {
 		exhausted, err := incrementUsageBillingAPIKeyQuotaAndRateLimit(ctx, tx, cmd.APIKeyID, cmd.APIKeyQuotaCost, cmd.APIKeyRateLimitCost)
 		if err != nil && !errors.Is(err, service.ErrAPIKeyNotFound) {
 			return err
@@ -213,7 +230,8 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 			return err
 		}
 		result.APIKeyQuotaExhausted = exhausted
-	} else if cmd.APIKeyRateLimitCost > 0 {
+	}
+	if !combinedKey && cmd.APIKeyRateLimitCost > 0 {
 		if err := incrementUsageBillingAPIKeyRateLimit(ctx, tx, cmd.APIKeyID, cmd.APIKeyRateLimitCost); err != nil && !errors.Is(err, service.ErrAPIKeyNotFound) {
 			return err
 		}
@@ -484,48 +502,7 @@ func incrementUsageBillingAPIKeyRateLimit(ctx context.Context, tx *sql.Tx, apiKe
 
 func incrementUsageBillingAccountQuota(ctx context.Context, tx *sql.Tx, accountID int64, amount float64) (*service.AccountQuotaState, error) {
 	rows, err := tx.QueryContext(ctx,
-		`UPDATE accounts SET extra = (
-			COALESCE(extra, '{}'::jsonb)
-			|| jsonb_build_object('quota_used', COALESCE((extra->>'quota_used')::numeric, 0) + $1)
-			|| CASE WHEN COALESCE((extra->>'quota_daily_limit')::numeric, 0) > 0 THEN
-				jsonb_build_object(
-					'quota_daily_used',
-					CASE WHEN `+dailyExpiredExpr+`
-					THEN $1
-					ELSE COALESCE((extra->>'quota_daily_used')::numeric, 0) + $1 END,
-					'quota_daily_start',
-					CASE WHEN `+dailyExpiredExpr+`
-					THEN `+nowUTC+`
-					ELSE COALESCE(extra->>'quota_daily_start', `+nowUTC+`) END
-				)
-				|| CASE WHEN `+dailyExpiredExpr+` AND `+nextDailyResetAtExpr+` IS NOT NULL
-				   THEN jsonb_build_object('quota_daily_reset_at', `+nextDailyResetAtExpr+`)
-				   ELSE '{}'::jsonb END
-			ELSE '{}'::jsonb END
-			|| CASE WHEN COALESCE((extra->>'quota_weekly_limit')::numeric, 0) > 0 THEN
-				jsonb_build_object(
-					'quota_weekly_used',
-					CASE WHEN `+weeklyExpiredExpr+`
-					THEN $1
-					ELSE COALESCE((extra->>'quota_weekly_used')::numeric, 0) + $1 END,
-					'quota_weekly_start',
-					CASE WHEN `+weeklyExpiredExpr+`
-					THEN `+nowUTC+`
-					ELSE COALESCE(extra->>'quota_weekly_start', `+nowUTC+`) END
-				)
-				|| CASE WHEN `+weeklyExpiredExpr+` AND `+nextWeeklyResetAtExpr+` IS NOT NULL
-				   THEN jsonb_build_object('quota_weekly_reset_at', `+nextWeeklyResetAtExpr+`)
-				   ELSE '{}'::jsonb END
-			ELSE '{}'::jsonb END
-		), updated_at = NOW()
-		WHERE id = $2 AND deleted_at IS NULL
-		RETURNING
-			COALESCE((extra->>'quota_used')::numeric, 0),
-			COALESCE((extra->>'quota_limit')::numeric, 0),
-			COALESCE((extra->>'quota_daily_used')::numeric, 0),
-			COALESCE((extra->>'quota_daily_limit')::numeric, 0),
-			COALESCE((extra->>'quota_weekly_used')::numeric, 0),
-			COALESCE((extra->>'quota_weekly_limit')::numeric, 0)`,
+		usageBillingAccountQuotaSQL,
 		amount, accountID)
 	if err != nil {
 		return nil, err
@@ -575,3 +552,47 @@ func incrementUsageBillingAccountQuota(ctx context.Context, tx *sql.Tx, accountI
 	}
 	return &state, nil
 }
+
+// Shared with batch billing so quota reset expressions stay identical.
+const usageBillingAccountQuotaSQL = `UPDATE accounts SET extra = (
+			COALESCE(extra, '{}'::jsonb)
+			|| jsonb_build_object('quota_used', COALESCE((extra->>'quota_used')::numeric, 0) + $1)
+			|| CASE WHEN COALESCE((extra->>'quota_daily_limit')::numeric, 0) > 0 THEN
+				jsonb_build_object(
+					'quota_daily_used',
+					CASE WHEN ` + dailyExpiredExpr + `
+					THEN $1
+					ELSE COALESCE((extra->>'quota_daily_used')::numeric, 0) + $1 END,
+					'quota_daily_start',
+					CASE WHEN ` + dailyExpiredExpr + `
+					THEN ` + nowUTC + `
+					ELSE COALESCE(extra->>'quota_daily_start', ` + nowUTC + `) END
+				)
+				|| CASE WHEN ` + dailyExpiredExpr + ` AND ` + nextDailyResetAtExpr + ` IS NOT NULL
+				   THEN jsonb_build_object('quota_daily_reset_at', ` + nextDailyResetAtExpr + `)
+				   ELSE '{}'::jsonb END
+			ELSE '{}'::jsonb END
+			|| CASE WHEN COALESCE((extra->>'quota_weekly_limit')::numeric, 0) > 0 THEN
+				jsonb_build_object(
+					'quota_weekly_used',
+					CASE WHEN ` + weeklyExpiredExpr + `
+					THEN $1
+					ELSE COALESCE((extra->>'quota_weekly_used')::numeric, 0) + $1 END,
+					'quota_weekly_start',
+					CASE WHEN ` + weeklyExpiredExpr + `
+					THEN ` + nowUTC + `
+					ELSE COALESCE(extra->>'quota_weekly_start', ` + nowUTC + `) END
+				)
+				|| CASE WHEN ` + weeklyExpiredExpr + ` AND ` + nextWeeklyResetAtExpr + ` IS NOT NULL
+				   THEN jsonb_build_object('quota_weekly_reset_at', ` + nextWeeklyResetAtExpr + `)
+				   ELSE '{}'::jsonb END
+			ELSE '{}'::jsonb END
+		), updated_at = NOW()
+		WHERE id = $2 AND deleted_at IS NULL
+		RETURNING
+			COALESCE((extra->>'quota_used')::numeric, 0),
+			COALESCE((extra->>'quota_limit')::numeric, 0),
+			COALESCE((extra->>'quota_daily_used')::numeric, 0),
+			COALESCE((extra->>'quota_daily_limit')::numeric, 0),
+			COALESCE((extra->>'quota_weekly_used')::numeric, 0),
+			COALESCE((extra->>'quota_weekly_limit')::numeric, 0)`

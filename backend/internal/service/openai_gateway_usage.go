@@ -518,6 +518,10 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	}, s.billingDeps(), s.usageBillingRepo)
 
 	if billingErr != nil {
+		if errors.Is(billingErr, ErrUsageBillingOutcomeUnknown) {
+			logger.LegacyPrintf("service.openai_gateway", "billing outcome unconfirmed; manual reconciliation required: request=%s key=%d usage_log=%s err=%v", usageLog.RequestID, apiKey.ID, billingUsageAudit(usageLog), billingErr)
+			return billingErr
+		}
 		usageLog.ActualCost = 0
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
 		return billingErr

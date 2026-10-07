@@ -48,7 +48,7 @@ func TestUsageBillingAPIKeyCombinedMatchesSeparate(t *testing.T) {
 					_, err = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT original")
 					require.NoError(t, err)
 					result := &service.UsageBillingApplyResult{}
-					require.NoError(t, (&usageBillingRepository{}).applyUsageBillingEffects(ctx, tx, &service.UsageBillingCommand{
+					require.NoError(t, (&usageBillingRepository{optimizedWrites: true}).applyUsageBillingEffects(ctx, tx, &service.UsageBillingCommand{
 						APIKeyID: key.ID, APIKeyQuotaCost: amounts[0], APIKeyRateLimitCost: amounts[1],
 					}, result))
 					combined, combinedEvents := billingKeySnapshot(t, ctx, tx, key.ID, key.Key)
