@@ -77,7 +77,7 @@ const (
 	cacheWriteBufferSize      = 1000            // 任务队列缓冲大小
 	cacheWriteTimeout         = 2 * time.Second // 单个写入操作超时
 	cacheWriteDropLogInterval = 5 * time.Second // 丢弃日志节流间隔
-	balanceLoadTimeout        = 3 * time.Second
+	balanceLoadTimeout        = 5 * time.Second
 )
 
 // cacheWriteTask 缓存写入任务
