@@ -32,6 +32,8 @@ type userRepository struct {
 	sql    sqlExecutor
 }
 
+var _ service.UserBalanceReader = (*userRepository)(nil)
+
 var _ service.RedeemUserAdjustmentRepository = (*userRepository)(nil)
 
 func NewUserRepository(client *dbent.Client, sqlDB *sql.DB) service.UserRepository {
@@ -988,6 +990,11 @@ func (r *userRepository) SetBalance(ctx context.Context, id int64, value float64
 		return service.BalanceChange{}, service.ErrUserNotFound
 	}
 	return change, nil
+}
+
+// GetBalance reads the current balance without loading user details or groups.
+func (r *userRepository) GetBalance(ctx context.Context, id int64) (float64, error) {
+	return r.currentBalance(ctx, id)
 }
 
 // currentBalance 读取用户当前余额，用户不存在时返回 ErrUserNotFound。

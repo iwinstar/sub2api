@@ -348,8 +348,20 @@ func (s *BillingCacheService) GetUserBalance(ctx context.Context, userID int64) 
 	return balance, nil
 }
 
+// UserBalanceReader is an optional repository capability for balance-only reads.
+type UserBalanceReader interface {
+	GetBalance(ctx context.Context, userID int64) (float64, error)
+}
+
 // getUserBalanceFromDB 从数据库获取用户余额
 func (s *BillingCacheService) getUserBalanceFromDB(ctx context.Context, userID int64) (float64, error) {
+	if reader, ok := s.userRepo.(UserBalanceReader); ok {
+		balance, err := reader.GetBalance(ctx, userID)
+		if err != nil {
+			return 0, fmt.Errorf("get user balance: %w", err)
+		}
+		return balance, nil
+	}
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return 0, fmt.Errorf("get user balance: %w", err)
