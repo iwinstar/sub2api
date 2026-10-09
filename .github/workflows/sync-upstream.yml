@@ -19,8 +19,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          # Optional token with Contents/Workflows write access if required.
-          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          # Required: upstream releases may modify .github/workflows/*.yml.
+          # The token needs Contents and Workflows read/write access.
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Merge latest stable upstream release
         env:
