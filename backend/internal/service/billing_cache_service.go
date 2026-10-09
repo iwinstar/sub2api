@@ -643,31 +643,40 @@ func (s *BillingCacheService) checkAPIKeyRateLimits(ctx context.Context, apiKey 
 	return s.evaluateRateLimits(ctx, apiKey, cacheData.Usage5h, cacheData.Usage1d, cacheData.Usage7d, w5h, w1d, w7d)
 }
 
-// evaluateRateLimits checks usage against limits, triggering async resets for expired windows.
+// evaluateRateLimits checks usage against limits, invalidating stale cache and resetting initialized expired windows.
 func (s *BillingCacheService) evaluateRateLimits(ctx context.Context, apiKey *APIKey, usage5h, usage1d, usage7d float64, w5h, w1d, w7d *time.Time) error {
-	needsReset := false
+	needsInvalidate, needsDBReset := false, false
 
 	// Reset expired windows in-memory for check purposes
 	if IsWindowExpired(w5h, RateLimitWindow5h) {
 		usage5h = 0
-		needsReset = true
+		needsInvalidate = true
+		if w5h != nil {
+			needsDBReset = true
+		}
 	}
 	if IsWindowExpired(w1d, RateLimitWindow1d) {
 		usage1d = 0
-		needsReset = true
+		needsInvalidate = true
+		if w1d != nil {
+			needsDBReset = true
+		}
 	}
 	if IsWindowExpired(w7d, RateLimitWindow7d) {
 		usage7d = 0
-		needsReset = true
+		needsInvalidate = true
+		if w7d != nil {
+			needsDBReset = true
+		}
 	}
 
-	// Trigger async DB reset if any window expired
-	if needsReset {
+	// Nil windows still need cache invalidation, but the DB reset only handles initialized windows.
+	if needsInvalidate {
 		keyID := apiKey.ID
 		go func() {
 			resetCtx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
 			defer cancel()
-			if s.apiKeyRateLimitLoader != nil {
+			if needsDBReset && s.apiKeyRateLimitLoader != nil {
 				// Use the repo directly - reset then reload cache
 				if loader, ok := s.apiKeyRateLimitLoader.(interface {
 					ResetRateLimitWindows(ctx context.Context, id int64) error
