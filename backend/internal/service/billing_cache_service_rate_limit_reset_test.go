@@ -68,7 +68,7 @@ func TestEvaluateRateLimits_ResetAndInvalidate(t *testing.T) {
 			loader := &rateLimitResetLoaderStub{err: tc.resetErr}
 			cache := &rateLimitResetCacheStub{invalidated: make(chan bool, 2)}
 			s := &BillingCacheService{cache: cache, apiKeyRateLimitLoader: loader}
-			err := s.evaluateRateLimits(context.Background(), &APIKey{ID: 1, RateLimit5h: 10, RateLimit1d: 10, RateLimit7d: 10}, tc.usage, tc.usage, tc.usage, tc.windows[0], tc.windows[1], tc.windows[2])
+			err := s.evaluateRateLimits(context.Background(), &APIKey{ID: 1, RateLimit5h: 10, RateLimit1d: 10, RateLimit7d: 10}, tc.usage, tc.usage, tc.usage, tc.windows[0], tc.windows[1], tc.windows[2], 0)
 			require.ErrorIs(t, err, tc.wantErr)
 			if tc.invalidate {
 				select {
