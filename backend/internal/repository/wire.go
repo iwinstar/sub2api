@@ -69,7 +69,7 @@ func ProvideUsageBillingBatchRepository(base *usageBillingRepository, cfg *confi
 	if cfg == nil || !cfg.Billing.AutomaticBatchEnabled {
 		return nil
 	}
-	return NewUsageBillingBatchRepository(base)
+	return NewUsageBillingBatchRepository(base, cfg)
 }
 
 func ProvideBillingAccountRepository(client *ent.Client, db *sql.DB, cache service.SchedulerCache, cfg *config.Config) service.AccountRepository {

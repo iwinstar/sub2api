@@ -146,7 +146,7 @@ func TestBillingBatchUsagePoolPressure(t *testing.T) {
 	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, `SELECT id FROM accounts WHERE id=$1 FOR NO KEY UPDATE`, account.ID)
 	require.NoError(t, err)
-	queue := NewUsageBillingBatchRepository(&usageBillingRepository{db: integrationDB})
+	queue := NewUsageBillingBatchRepository(&usageBillingRepository{db: integrationDB}, nil)
 	defer queue.Stop()
 	queue.blockedMu.Lock()
 	queue.blocked[billingSubject{'a', account.ID}] = time.Now().Add(billingBlockedTTL)

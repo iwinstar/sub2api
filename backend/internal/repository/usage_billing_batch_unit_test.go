@@ -350,10 +350,41 @@ func TestBillingBatchConfigurationSelectsRepository(t *testing.T) {
 	}
 	cfg := &config.Config{}
 	cfg.Billing.AutomaticBatchEnabled = true
+	cfg.Gateway.UsageRecord.AutoScaleEnabled = true
+	cfg.Gateway.UsageRecord.AutoScaleMinWorkers = 128
+	cfg.Gateway.UsageRecord.AutoScaleMaxWorkers = 2048
 	batch := ProvideUsageBillingBatchRepository(base, cfg)
 	require.NotNil(t, batch)
+	require.Equal(t, 80, batch.batchSize)
 	require.True(t, base.optimizedWrites)
 	require.True(t, ProvideBillingAccountRepository(nil, nil, nil, cfg).(*accountRepository).optimizedBillingWrites)
 	defer batch.Stop()
 	require.Same(t, batch, ProvideUsageBillingRepository(base, batch))
+}
+
+func TestUsageBillingBatchSizeFromWorkerConfig(t *testing.T) {
+	require.Equal(t, 32, usageBillingBatchSize(nil, 8))
+	for _, tt := range []struct {
+		name                                 string
+		minimum, maximum, initial, executors int
+		auto                                 bool
+		want                                 int
+	}{
+		{"defaults", 128, 512, 128, 8, true, 32},
+		{"larger maximum", 128, 2048, 128, 8, true, 80},
+		{"round final fraction", 129, 513, 128, 8, true, 33},
+		{"odd maximum", 128, 515, 128, 8, true, 33},
+		{"more executors", 128, 512, 128, 16, true, 16},
+		{"minimum one", 1, 1, 1, 8, true, 1},
+		{"fixed workers", 128, 512, 128, 8, false, 20},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.UsageRecord.AutoScaleEnabled = tt.auto
+			cfg.Gateway.UsageRecord.AutoScaleMinWorkers = tt.minimum
+			cfg.Gateway.UsageRecord.AutoScaleMaxWorkers = tt.maximum
+			cfg.Gateway.UsageRecord.WorkerCount = tt.initial
+			require.Equal(t, tt.want, usageBillingBatchSize(cfg, tt.executors))
+		})
+	}
 }

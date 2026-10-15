@@ -138,7 +138,7 @@ func runBillingWriteComparison(t *testing.T, ctx context.Context, users, account
 	repo := &usageBillingRepository{db: integrationDB}
 	var queue *UsageBillingBatchRepository
 	if len(automatic) > 0 && automatic[0] {
-		queue = NewUsageBillingBatchRepository(repo)
+		queue = NewUsageBillingBatchRepository(repo, nil)
 		defer queue.Stop()
 	}
 	workers := 32

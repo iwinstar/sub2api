@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 )
@@ -17,7 +18,6 @@ var errUsageBillingStopped = errors.New("usage billing queue is stopped")
 
 const (
 	billingQueueCapacity    = 16384
-	billingBatchSize        = 100
 	billingBatchWorkers     = 8
 	billingRecoveryWorkers  = 2
 	billingRecoveryCapacity = 32
@@ -67,6 +67,7 @@ type usageBillingBatchBackend interface {
 // UsageBillingBatchRepository coalesces only already waiting commands; it never
 // waits to fill a batch. Image state transitions keep their original repository.
 type UsageBillingBatchRepository struct {
+	batchSize         int
 	base              usageBillingBatchBackend
 	queues            []chan *usageBillingBatchItem
 	accountGates      []chan struct{}
@@ -94,14 +95,47 @@ type UsageBillingBatchRepository struct {
 	maxQueueAgeNanos  atomic.Int64
 }
 
-func NewUsageBillingBatchRepository(base *usageBillingRepository) *UsageBillingBatchRepository {
+func NewUsageBillingBatchRepository(base *usageBillingRepository, cfg *config.Config) *UsageBillingBatchRepository {
 	base.optimizedWrites = true
-	return newUsageBillingBatchRepository(base, billingBatchWorkers, billingQueueCapacity)
+	return newUsageBillingBatchRepository(base, billingBatchWorkers, billingQueueCapacity, usageBillingBatchSize(cfg, billingBatchWorkers))
 }
-func newUsageBillingBatchRepository(base usageBillingBatchBackend, workers, capacity int) *UsageBillingBatchRepository {
+
+// usageBillingBatchSize derives the cap from configured usage concurrency, not
+// the current worker count. Round only the final result up; never wait to fill it.
+func usageBillingBatchSize(cfg *config.Config, executors int) int {
+	minWorkers, maxWorkers := 128, 512
+	if cfg != nil {
+		opts := cfg.Gateway.UsageRecord
+		if opts.AutoScaleEnabled {
+			if opts.AutoScaleMinWorkers > 0 {
+				minWorkers = opts.AutoScaleMinWorkers
+			}
+			if opts.AutoScaleMaxWorkers > 0 {
+				maxWorkers = opts.AutoScaleMaxWorkers
+			}
+			maxWorkers = max(maxWorkers, minWorkers)
+		} else {
+			minWorkers = max(1, opts.WorkerCount)
+			if opts.WorkerCount <= 0 {
+				minWorkers = 128
+			}
+			maxWorkers = minWorkers
+		}
+	}
+	// (max/2 + min*2)/2/executors = (max + 4*min)/(4*executors).
+	numerator := int64(maxWorkers) + 4*int64(minWorkers)
+	denominator := 4 * int64(max(1, executors))
+	return max(1, int((numerator+denominator-1)/denominator))
+}
+
+func newUsageBillingBatchRepository(base usageBillingBatchBackend, workers, capacity int, batchSizes ...int) *UsageBillingBatchRepository {
+	batchSize := usageBillingBatchSize(nil, workers)
+	if len(batchSizes) > 0 {
+		batchSize = max(1, batchSizes[0])
+	}
 	// Sharing a gate must imply sharing a worker, including nondefault worker counts.
 	gateCount := ((billingAccountGateCount + workers - 1) / workers) * workers
-	r := &UsageBillingBatchRepository{base: base, accountOrdinals: make(map[int64]uint64), queues: make([]chan *usageBillingBatchItem, workers), accountGates: make([]chan struct{}, gateCount), permits: make(chan struct{}, capacity), stopping: make(chan struct{}), blocked: make(map[billingSubject]time.Time), probes: make(map[billingSubject]*billingSubjectProbe), probeSlots: make(chan struct{}, 2), recovery: make(chan []*usageBillingBatchItem, billingRecoveryCapacity), done: make(chan struct{})}
+	r := &UsageBillingBatchRepository{batchSize: batchSize, base: base, accountOrdinals: make(map[int64]uint64), queues: make([]chan *usageBillingBatchItem, workers), accountGates: make([]chan struct{}, gateCount), permits: make(chan struct{}, capacity), stopping: make(chan struct{}), blocked: make(map[billingSubject]time.Time), probes: make(map[billingSubject]*billingSubjectProbe), probeSlots: make(chan struct{}, 2), recovery: make(chan []*usageBillingBatchItem, billingRecoveryCapacity), done: make(chan struct{})}
 	for i := range r.accountGates {
 		r.accountGates[i] = make(chan struct{}, 1)
 	}
@@ -230,14 +264,14 @@ func (r *UsageBillingBatchRepository) worker(queue chan *usageBillingBatchItem) 
 			}
 		}
 
-		batch := make([]*usageBillingBatchItem, 0, billingBatchSize)
+		batch := make([]*usageBillingBatchItem, 0, r.batchSize)
 		if first.state.CompareAndSwap(billingItemWaiting, billingItemExecuting) || first.state.Load() == billingItemExecuting {
 			batch = append(batch, first)
 		} else {
 			first.release()
 		}
 	collect:
-		for len(batch) < billingBatchSize {
+		for len(batch) < r.batchSize {
 			select {
 			case next := <-queue:
 				if next.state.CompareAndSwap(billingItemWaiting, billingItemExecuting) || next.state.Load() == billingItemExecuting {
