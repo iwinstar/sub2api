@@ -295,6 +295,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { CONCRETE_PLATFORM_OPTIONS } from '@/constants/platforms'
+import { platformLabel } from './platformLabel'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores/app'
@@ -420,24 +421,6 @@ function toggleIgnoredCategory(category: string) {
 function categoryLabel(category: string) {
   const key = `channelMonitorV2.errorCategories.${category}`
   return te(key) ? t(key) : category
-}
-
-function platformLabel(value: string) {
-  return (
-    {
-      anthropic: 'Claude',
-      openai: 'OpenAI',
-      grok: 'Grok',
-      kiro: 'Kiro',
-      gemini: 'Gemini',
-      antigravity: 'Antigravity',
-      kimi: 'Kimi',
-      zhipu: 'Zhipu GLM',
-      deepseek: 'DeepSeek',
-      minimax: 'MiniMax',
-      composite: 'Composite',
-    } as Record<string, string>
-  )[value] || value
 }
 
 function normalizeConfig(value: MonitorConfig): MonitorConfig {

@@ -310,7 +310,7 @@
                     <div class="flex items-center gap-2">
                       <span :class="statusDot(row.health)" aria-hidden="true"></span>
                       <div>
-                        <span class="block text-xs text-gray-500 dark:text-dark-400">{{ row.platform }}</span>
+                        <span class="block text-xs text-gray-500 dark:text-dark-400">{{ platformLabel(row.platform) }}</span>
                         <strong class="font-semibold text-gray-900 dark:text-white">
                           {{ row.model === '__other__' ? t('channelMonitorV2.otherModels') : row.model }}
                         </strong>
@@ -370,7 +370,7 @@
                     class="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:bg-dark-900/50 dark:text-dark-300"
                   >
                     <div class="mb-1 flex flex-wrap items-center gap-2">
-                      <span class="badge badge-gray !px-1.5 !py-0 text-[10px]">{{ detail.platform || '-' }}</span>
+                      <span class="badge badge-gray !px-1.5 !py-0 text-[10px]">{{ detail.platform ? platformLabel(detail.platform) : '-' }}</span>
                       <span class="truncate font-medium">{{ detail.model || '-' }}</span>
                       <span v-if="detail.status_code" class="text-gray-400">{{ t('channelMonitorV2.errorDetail.http', { code: detail.status_code }) }}</span>
                       <span v-if="detail.upstream_status_code" class="text-gray-400">{{ t('channelMonitorV2.errorDetail.upstream', { code: detail.upstream_status_code }) }}</span>
@@ -460,6 +460,7 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
+import { platformLabel } from '@/features/channel-monitor-v2/platformLabel'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -636,7 +637,7 @@ const hasDimensionFilter = computed(
 const platformOptions = computed(() =>
   (dimensions.value.platforms || []).map((item) => ({
     value: item.value,
-    label: item.label,
+    label: platformLabel(item.value),
   }))
 )
 const selectedPlatforms = computed(() => new Set(filter.value.platforms))
@@ -650,7 +651,7 @@ const groupOptions = computed(() =>
     )
     .map((item) => ({
       value: String(item.id),
-      label: item.platform ? `${item.platform} / ${item.name || `#${item.id}`}` : item.name || `#${item.id}`,
+      label: item.platform ? `${platformLabel(item.platform)} / ${item.name || `#${item.id}`}` : item.name || `#${item.id}`,
     }))
 )
 const modelOptions = computed(() =>
@@ -665,7 +666,7 @@ const modelOptions = computed(() =>
       value: item.value,
       label:
         item.platform && !item.label.includes(item.platform)
-          ? `${item.platform} / ${item.label}`
+          ? `${platformLabel(item.platform)} / ${item.label}`
           : item.label,
     }))
 )
